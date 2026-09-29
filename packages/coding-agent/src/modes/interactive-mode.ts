@@ -2018,10 +2018,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		});
 	}
 
-	playWelcomeIntro(): void {
-		this.composer.playWelcomeIntro();
-	}
-
 	async init(options: InteractiveModeInitOptions = {}): Promise<void> {
 		if (this.isInitialized) return;
 
@@ -2229,7 +2225,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (!this.#ownsStartedUi) {
 			this.composer.start({
 				clearScrollback: options.clearInitialTerminalHistory === true,
-				playWelcomeIntro: !options.suppressWelcomeIntro,
 			});
 			this.#ownsStartedUi = true;
 		}

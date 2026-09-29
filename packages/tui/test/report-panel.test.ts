@@ -39,7 +39,7 @@ async function mountReport(bodyRows: number) {
 	const editor = new Container();
 	editor.addChild(new Text("EDITOR", 0, 0));
 	composer.setRuntimeChildren([transcript, dock, editor], { transient: [editor, dock] });
-	composer.start({ playWelcomeIntro: false });
+	composer.start();
 	await scheduler.settle(terminal);
 	const panel = new ReportPanel({
 		title: "Full Changelog",
@@ -127,7 +127,7 @@ describe("ReportPanel in text mode", () => {
 		const editor = new Container();
 		editor.addChild(new Text("EDITOR", 0, 0));
 		composer.setRuntimeChildren([transcript, dock, editor], { transient: [editor, dock] });
-		composer.start({ playWelcomeIntro: false });
+		composer.start();
 		await scheduler.settle(terminal);
 		const editorRow = () => terminal.getViewport().findIndex(row => row.includes("EDITOR"));
 		// The welcome tip is picked at random and wraps to a varying height, so

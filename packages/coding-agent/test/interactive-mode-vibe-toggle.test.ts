@@ -484,7 +484,7 @@ describe("InteractiveMode vibe mode toggle", () => {
 	});
 
 	it("preserves workers, Todo access, and mode metadata on a same-session reload", async () => {
-		await mode.init({ suppressWelcomeIntro: true });
+		await mode.init({});
 		await mode.handleVibeModeCommand();
 		await session.sessionManager.ensureOnDisk();
 		const sessionFile = session.sessionFile;
@@ -541,7 +541,7 @@ describe("InteractiveMode vibe mode toggle", () => {
 		const { session: targetSession, mode: targetMode } = openFixture();
 		let targetFile: string;
 		try {
-			await targetMode.init({ suppressWelcomeIntro: true });
+			await targetMode.init({});
 			await targetSession.setActiveToolsByName(["read", "todo", "bash"]);
 			await targetMode.handleVibeModeCommand();
 			expect(targetSession.getActiveToolNames()).not.toContain("bash");
@@ -568,7 +568,7 @@ describe("InteractiveMode vibe mode toggle", () => {
 		// reconciliation runs.
 		const { session: sourceSession, mode: sourceMode } = openFixture();
 		try {
-			await sourceMode.init({ suppressWelcomeIntro: true });
+			await sourceMode.init({});
 			await sourceSession.setActiveToolsByName(["read", "todo", "bash"]);
 			await sourceMode.handleVibeModeCommand();
 			expect(sourceMode.vibeModeEnabled).toBe(true);
@@ -616,7 +616,7 @@ describe("InteractiveMode vibe mode toggle", () => {
 		const { session: targetSession, mode: targetMode } = openFixture(["read", "todo"]);
 		let targetFile: string;
 		try {
-			await targetMode.init({ suppressWelcomeIntro: true });
+			await targetMode.init({});
 			await targetSession.setActiveToolsByName(["read", "todo"]);
 			await targetMode.handleVibeModeCommand();
 			await targetSession.sessionManager.ensureOnDisk();
@@ -635,7 +635,7 @@ describe("InteractiveMode vibe mode toggle", () => {
 		// the rest of the session.
 		const { session: resumed, mode: resumedMode } = openFixture(["read", "todo", "bash"]);
 		try {
-			await resumedMode.init({ suppressWelcomeIntro: true });
+			await resumedMode.init({});
 			await resumed.setActiveToolsByName(["read", "todo", "bash"]);
 			expect(resumedMode.vibeModeEnabled).toBe(false);
 
@@ -653,7 +653,7 @@ describe("InteractiveMode vibe mode toggle", () => {
 	});
 
 	it("passes the session's active model into vibe rehydration on resume", async () => {
-		await mode.init({ suppressWelcomeIntro: true });
+		await mode.init({});
 		session.setThinkingLevel(Effort.High);
 		await mode.handleVibeModeCommand();
 		await session.sessionManager.ensureOnDisk();
@@ -679,7 +679,7 @@ describe("InteractiveMode vibe mode toggle", () => {
 	});
 
 	it("suspends the old scope without tombstones when switching to another vibe parent", async () => {
-		await mode.init({ suppressWelcomeIntro: true });
+		await mode.init({});
 		await mode.handleVibeModeCommand();
 		await session.sessionManager.ensureOnDisk();
 		const originalSessionId = session.sessionManager.getSessionId();
@@ -703,7 +703,7 @@ describe("InteractiveMode vibe mode toggle", () => {
 	});
 
 	it("does not clobber the target's active tools with the source snapshot when switching out of vibe", async () => {
-		await mode.init({ suppressWelcomeIntro: true });
+		await mode.init({});
 		// Pre-vibe snapshot on the source session is empty; entering vibe activates
 		// read, parent-owned todo, and the vibe tools.
 		await mode.handleVibeModeCommand();
@@ -731,7 +731,7 @@ describe("InteractiveMode vibe mode toggle", () => {
 	});
 
 	it("rejects new, drop, fork, and move transitions at the AgentSession boundary while vibe is active", async () => {
-		await mode.init({ suppressWelcomeIntro: true });
+		await mode.init({});
 		await mode.handleVibeModeCommand();
 		await session.sessionManager.ensureOnDisk();
 		const sessionFile = session.sessionFile;
@@ -751,7 +751,7 @@ describe("InteractiveMode vibe mode toggle", () => {
 	});
 
 	it("warns instead of rejecting for interactive session transitions while vibe is active", async () => {
-		await mode.init({ suppressWelcomeIntro: true });
+		await mode.init({});
 		await mode.handleVibeModeCommand();
 		await session.sessionManager.ensureOnDisk();
 		const sessionFile = session.sessionFile;
@@ -770,7 +770,7 @@ describe("InteractiveMode vibe mode toggle", () => {
 	});
 
 	it("keeps vibe mode and tools active after a real storage failure, then allows a retry", async () => {
-		await mode.init({ suppressWelcomeIntro: true });
+		await mode.init({});
 		await mode.handleVibeModeCommand();
 		const activeTools = session.getActiveToolNames();
 		storage.failNextAtomicWrite = true;
@@ -793,7 +793,7 @@ describe("InteractiveMode vibe mode toggle", () => {
 		// which is irrelevant here; short-circuit it to the no-repository case.
 		vi.spyOn(vcs, "git").mockReturnValue(null);
 		vi.spyOn(vcs, "repo").mockReturnValue(null);
-		await mode.init({ suppressWelcomeIntro: true });
+		await mode.init({});
 		await mode.handleVibeModeCommand();
 		expect(mode.vibeModeEnabled).toBe(true);
 
@@ -824,7 +824,7 @@ describe("InteractiveMode vibe mode toggle", () => {
 	it("exits vibe mode after a /btw branch re-anchors the owner scope (issue #10468)", async () => {
 		vi.spyOn(vcs, "git").mockReturnValue(null);
 		vi.spyOn(vcs, "repo").mockReturnValue(null);
-		await mode.init({ suppressWelcomeIntro: true });
+		await mode.init({});
 		session.sessionManager.appendMessage({ role: "user", content: "seed", timestamp: Date.now() - 2 });
 		session.sessionManager.appendMessage(createAssistantMessage("seed response"));
 		await mode.handleVibeModeCommand();
