@@ -43,6 +43,10 @@
 - Submitting exactly `exit`, `quit`, or `q` (any case, no leading `/`, nothing else in the input) in a session with no messages now quits; turn off with `input.bareExitOnEmptySession` ([#13755](https://github.com/can1357/oh-my-pi/pull/13755) by [@H4vC](https://github.com/H4vC))
 - Extensions can now rewrite finalized assistant-message text through the awaited `assistant_message` hook before it reaches context, history, and `message_end` ([#13769](https://github.com/can1357/oh-my-pi/pull/13769) by [@NaC-L](https://github.com/nac-l))
 
+### Removed
+
+- The onboarding wizard no longer runs on a fresh install, and the startup welcome animation is gone. A new session starts immediately on the default model and default theme; run `/setup` (or `omp setup`) to walk the onboarding steps, or set `startup.setupWizard: true` to have newly added steps appear once per setup version.
+
 ### Fixed
 
 - Fixed `read` of an executable and `ida` hanging indefinitely while IDA's initial analysis of a large binary runs; they now give up after two minutes with an error naming the still-analyzing host, which keeps analyzing for later calls

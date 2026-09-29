@@ -123,6 +123,9 @@
 ### Fixed
 
 - The model browser shows `varies`, `included`, or `pricing unknown` for models whose catalog declares that state, instead of labeling them `free` ([#11613](https://github.com/can1357/oh-my-pi/pull/11613) by [@will-bogusz](https://github.com/will-bogusz)).
+### Removed
+
+- Removed the 3-second gradient logo animation that played on every launch. The welcome box now paints its resting frame on the first render and immediately becomes eligible to retire into scrollback, so nothing re-renders while it sits there.
 
 ## [18.4.3] - 2026-09-28
 

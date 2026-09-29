@@ -939,7 +939,7 @@ describe("InteractiveMode subagent observer UI sync", () => {
 	});
 
 	it("coalesces a burst of progress observer changes into one HUD rebuild and render request", async () => {
-		await mode.init({ suppressWelcomeIntro: true });
+		await mode.init({});
 		const requestRender = vi.spyOn(mode.ui, "requestRender").mockImplementation(() => {});
 		const mountHud = vi.spyOn(mode.subagentContainer, "addChild");
 		const updateHud = vi.spyOn(SubagentHudComponent.prototype, "update");
@@ -966,7 +966,7 @@ describe("InteractiveMode subagent observer UI sync", () => {
 	});
 
 	it("applies the setting over a clicked expand override", async () => {
-		await mode.init({ suppressWelcomeIntro: true });
+		await mode.init({});
 		for (let index = 0; index < 5; index++) {
 			eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, makeLifecycle(`Override${index}`, index, `job ${index}`));
 		}
@@ -983,7 +983,7 @@ describe("InteractiveMode subagent observer UI sync", () => {
 
 	it("advances a quiet call's elapsed marker by repainting the same HUD in place", async () => {
 		cfgDisplaySubagentLivePreview.override(Settings.instance, true);
-		await mode.init({ suppressWelcomeIntro: true });
+		await mode.init({});
 		vi.spyOn(mode.ui, "requestRender").mockImplementation(() => {});
 		vi.useFakeTimers();
 		setSystemTime(1_000_000);

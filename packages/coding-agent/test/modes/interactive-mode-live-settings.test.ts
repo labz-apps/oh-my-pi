@@ -50,7 +50,7 @@ describe("InteractiveMode live settings", () => {
 		vi.spyOn(mode.ui.terminal, "onGlyphProtocolReport").mockImplementation(callback => {
 			reportGlyphProtocol = callback;
 		});
-		await mode.init({ suppressWelcomeIntro: true });
+		await mode.init({});
 	});
 
 	afterEach(async () => {

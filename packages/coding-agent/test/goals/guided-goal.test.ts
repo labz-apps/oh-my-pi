@@ -119,7 +119,7 @@ function assistantTurn(content: AssistantMessage["content"]): AgentMessage {
 async function startInterview(harness: GuidedGoalHarness): Promise<void> {
 	vi.spyOn(vcs, "repo").mockReturnValue(null);
 	vi.spyOn(vcs, "git").mockReturnValue(null);
-	await harness.mode.init({ suppressWelcomeIntro: true });
+	await harness.mode.init({});
 	vi.spyOn(harness.session, "prompt").mockResolvedValue(true);
 	await harness.mode.handleGuidedGoalCommand("ship it");
 }
