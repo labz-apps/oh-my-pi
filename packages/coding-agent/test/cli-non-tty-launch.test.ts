@@ -14,6 +14,17 @@ const TTY_ERROR = "interactive mode requires a terminal";
 const CREDENTIAL_ENV =
 	/(_API_KEY|_TOKEN|_ACCESS_KEY_ID|_SECRET_ACCESS_KEY|_CREDENTIALS|^AWS_PROFILE|^GOOGLE_CLOUD_PROJECT)$/;
 
+/**
+ * `opencode-zen` publishes a credential-free tier, so an isolated home holding
+ * no key still resolves a runnable model and these launches continue into a
+ * live network call instead of stopping at the headless "No models available"
+ * exit. A `--config` overlay disables it for the child process only, restoring
+ * the credential-free premise the cases below assert against.
+ */
+const NO_FREE_TIER_OVERLAY = "disabledProviders:\n  - opencode-zen\n";
+/** Where the headless prompt runs above are expected to stop. */
+const NO_MODELS = "No models available.";
+
 interface LaunchRun {
 	exitCode: number;
 	stdout: string;
@@ -27,6 +38,8 @@ async function launchWithoutTerminal(
 ): Promise<LaunchRun> {
 	const home = tempDir.join("home");
 	fs.mkdirSync(home, { recursive: true });
+	const overlay = tempDir.join("no-free-tier.yml");
+	await Bun.write(overlay, NO_FREE_TIER_OVERLAY);
 	// Isolated home and no credentials: print mode can only end at the headless
 	// "No models available" exit, which the interactive path never reaches.
 	const env: Record<string, string | undefined> = { ...process.env, HOME: home, USERPROFILE: home, NO_COLOR: "1" };
@@ -47,13 +60,16 @@ async function launchWithoutTerminal(
 		delete env[key];
 	}
 	const discoveryArgs = extensionDiscovery ? [] : ["--no-extensions"];
-	const proc = Bun.spawn([process.execPath, cliEntry, "--no-session", ...discoveryArgs, ...args], {
-		cwd: tempDir.path(),
-		env,
-		stdin: "ignore",
-		stdout: "pipe",
-		stderr: "pipe",
-	});
+	const proc = Bun.spawn(
+		[process.execPath, cliEntry, "--no-session", "--config", overlay, ...discoveryArgs, ...args],
+		{
+			cwd: tempDir.path(),
+			env,
+			stdin: "ignore",
+			stdout: "pipe",
+			stderr: "pipe",
+		},
+	);
 	const [exitCode, stdout, stderr] = await Promise.all([
 		proc.exited,
 		new Response(proc.stdout).text(),
@@ -100,7 +116,7 @@ describe("launch without a terminal on stdin", () => {
 		const run = await launchWithoutTerminal(tempDir, ["say ok"]);
 
 		expect(run.stderr).not.toContain(TTY_ERROR);
-		expect(run.stderr).toContain("No models available.");
+		expect(run.stderr).toContain(NO_MODELS);
 		expect(run.exitCode, run.stderr).toBe(1);
 	}, 30_000);
 
@@ -141,7 +157,7 @@ describe("launch without a terminal on stdin", () => {
 		const run = await launchWithoutTerminal(tempDir, ["-e", extensionPath, "--spawn-peer", "reviewer", "say ok"]);
 
 		expect(run.stderr).not.toContain(TTY_ERROR);
-		expect(run.stderr).toContain("No models available.");
+		expect(run.stderr).toContain(NO_MODELS);
 		expect(run.exitCode, run.stderr).toBe(1);
 	}, 30_000);
 
@@ -154,7 +170,7 @@ describe("launch without a terminal on stdin", () => {
 
 		expect(run.stderr).not.toContain(TTY_ERROR);
 		expect(run.stderr).not.toContain("Invalid --mode value");
-		expect(run.stderr).toContain("No models available.");
+		expect(run.stderr).toContain(NO_MODELS);
 		expect(run.stderr).toContain("EXT_FLAG=true");
 		expect(run.exitCode, run.stderr).toBe(1);
 	}, 30_000);

@@ -392,6 +392,23 @@ describe.skipIf(!hasPtyHarness)("interactive startup changelog PTY smoke", () =>
 				]);
 				const output = Buffer.from(stdout).toString("utf8");
 
+				// Bun aborts a test at its first failed assertion, so everything the
+				// checks below would have said is lost when the exit code is wrong -
+				// which is precisely the case worth diagnosing. Report it first.
+				if (exitCode !== 124) {
+					const marker = await readLastChangelogVersion(agentDir);
+					console.error(
+						[
+							`[changelog-pty-smoke] exitCode=${exitCode} signal=${proc.signalCode ?? "-"} killed=${proc.killed}`,
+							`[changelog-pty-smoke] stdoutBytes=${Buffer.byteLength(output)} stderrBytes=${Buffer.byteLength(stderr)}`,
+							`[changelog-pty-smoke] hasChangelogHeading=${output.includes("## [")} hasFullHint=${output.includes(STARTUP_CHANGELOG_FULL_HINT)} stderrHasModuleError=${stderr.includes("Cannot find module")}`,
+							`[changelog-pty-smoke] lastChangelogVersion=${marker ?? "MISSING"} expected=${VERSION}`,
+							`[changelog-pty-smoke] --- stdout tail ---\n${output.slice(-3000)}`,
+							`[changelog-pty-smoke] --- stderr tail ---\n${stderr.slice(-3000)}`,
+						].join("\n"),
+					);
+				}
+
 				expect(exitCode).toBe(124);
 				expect(Buffer.byteLength(output)).toBeLessThan(PTY_STARTUP_OUTPUT_CEILING);
 				expect(output).not.toContain("## [");

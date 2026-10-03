@@ -587,6 +587,11 @@ export interface BuildSystemPromptOptions {
 	autoQaEnabled?: boolean;
 	/** Whether active `write` is restricted to xd:// dispatch and the plan artifact sandbox. */
 	writeTransportOnly?: boolean;
+	/**
+	 * Whether this prompt is for a subagent session. Replaces the Verify workflow with a hand-off:
+	 * the main agent verifies once after all subagents land, so parallel children don't storm the CPU.
+	 */
+	subagent?: boolean;
 }
 
 /** Result of building provider-facing system prompt messages. */
@@ -669,6 +674,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		xdevDocs = "",
 		autoQaEnabled = false,
 		writeTransportOnly = false,
+		subagent = false,
 		activeRepoContext: providedActiveRepoContext,
 	} = options;
 	const inlineToolDescriptors = providedInlineToolDescriptors ?? false;
@@ -715,9 +721,14 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	};
 
 	const { promise: deadline, resolve: fireDeadline } = Promise.withResolvers<"__timeout__">();
+	// Ref'd on purpose: this timer IS the bound on the prep, so it has to be able
+	// to hold the loop open long enough to fire. Unref'd, a step whose promise
+	// holds no handle of its own leaves the loop empty, `beforeExit` runs, and
+	// the launch ends in `reportUnsettledEntry`'s "the event loop drained" exit
+	// instead of taking the fallback this deadline exists to provide.
+	// A fast prep still holds nothing: `clearTimeout` below runs as soon as the
+	// prep settles.
 	const deadlineTimer = setTimeout(() => fireDeadline("__timeout__"), SYSTEM_PROMPT_PREP_TIMEOUT_MS);
-	// Unref so a fast prep does not hold a one-shot CLI alive waiting for this timer.
-	deadlineTimer.unref();
 	const timedOut: string[] = [];
 	const failed: Array<{ name: string; error: unknown }> = [];
 
@@ -997,6 +1008,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		xdevDocs,
 		autoQaEnabled,
 		writeTransportOnly,
+		subagent,
 	};
 	const selectedTemplate = resolvedCustomPrompt
 		? customSystemPromptTemplate

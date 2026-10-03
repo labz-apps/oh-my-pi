@@ -19,6 +19,7 @@ import {
 	VERSION,
 } from "@oh-my-pi/pi-utils/dirs";
 import { $env, isBunTestRuntime, setInteractiveHost } from "@oh-my-pi/pi-utils/env";
+import { keepEventLoopAlive } from "@oh-my-pi/pi-utils/event-loop-keepalive";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import * as postmortem from "@oh-my-pi/pi-utils/postmortem";
 import { fuzzyFilter } from "@oh-my-pi/pi-tui/fuzzy";
@@ -71,7 +72,6 @@ import { ExtensionRunner } from "./extensibility/extensions/runner";
 import type { ExtensionUIContext } from "./extensibility/extensions/types";
 import { scheduleMarketplaceAutoUpdate } from "./extensibility/plugins/marketplace-auto-update";
 import { registerDaemonProjectPresence } from "./launch/presence";
-import { discoverStartupLspServers } from "./lsp/servers";
 import type { MCPManager } from "./mcp";
 import type { InteractiveMode } from "./modes/interactive-mode";
 import type { PrintModeOptions } from "./modes/print-mode";
@@ -84,7 +84,6 @@ import { invokeSkillCommandFromText, isKnownSkillCommand } from "./modes/skill-c
 import {
 	applyStartupComposerPreferences,
 	type ComposerLease,
-	setStartupComposerLspServers,
 	stopPendingStartupComposer,
 	takeStartupComposerLease,
 } from "./modes/startup-composer";
@@ -112,7 +111,7 @@ import {
 } from "./session/foreign-session-import";
 import type { ForeignSessionInfo, ForeignSessionSource, ForeignSessionStore } from "./session/foreign-session-store";
 import { resolveResumableSession, type SessionInfo } from "./session/session-listing";
-import { ForkSourceNotFoundError, SessionManager } from "./session/session-manager";
+import { ForkSourceNotFoundError, SessionManager, SessionMoveRefusedError } from "./session/session-manager";
 import { shouldShowStartupSplash } from "./startup-splash";
 import {
 	discoverSystemPromptOverride,
@@ -175,7 +174,6 @@ import {
 } from "./session/settings";
 import { cfgDisabledProviders, cfgEnabledModels } from "./config/model-settings";
 import { cfgTaskAgentIdleTtlMs } from "./task/settings";
-import { cfgLspEnabled } from "./lsp/settings";
 import { cfgSkillsIncludeSkills } from "./extensibility/settings";
 import { cfgWorkspaceAdditionalDirectories } from "./session/context-settings";
 
@@ -310,6 +308,39 @@ let startupWatchdogTimer: NodeJS.Timeout | undefined;
 let startupWatchdogActive = false;
 let startupWatchdogStartedAt = 0;
 
+/**
+ * Ref'd handle held for the whole startup window, released by
+ * {@link stopStartupWatchdog}. Deliberately separate from the watchdog timer
+ * below, which is `unref()`ed so it can never be what keeps a launch alive.
+ *
+ * `omp launch` skips the prepaint composer (`PREPAINT_SAFE_FLAGS` in cli.ts has
+ * no `launch` entry), so from process start until InteractiveMode paints its
+ * first frame nothing owns the terminal and nothing reads stdin. Startup then
+ * survives only because each `await` happens to block on an operation that keeps
+ * an event-loop ref of its own — and not every operation does. This repo already
+ * has the class on record: on Bun 1.4.2 a `Bun.file()` read that rejects with
+ * ENOENT settles with no ref, which is why launch/client.ts reads its broker
+ * token with `node:fs`. When a startup await loses that race the loop drains,
+ * `beforeExit` fires, and the launch ends in `reportUnsettledEntry`'s one-line
+ * diagnostic instead of a running TUI.
+ *
+ * Holding one ref across the window removes that precondition, so no individual
+ * await can end the process. A startup that genuinely stalls still reports every
+ * 10s through the watchdog below (which is why it, and not this hold, is what
+ * stays unref'd).
+ */
+let releaseStartupEventLoopHold: (() => void) | undefined;
+
+function armStartupEventLoopHold(): void {
+	if (isBunTestRuntime() || releaseStartupEventLoopHold) return;
+	releaseStartupEventLoopHold = keepEventLoopAlive();
+}
+
+function disarmStartupEventLoopHold(): void {
+	releaseStartupEventLoopHold?.();
+	releaseStartupEventLoopHold = undefined;
+}
+
 function armStartupWatchdog(): void {
 	if (isBunTestRuntime()) return;
 	if (startupWatchdogTimer) return;
@@ -335,16 +366,24 @@ function startStartupWatchdog(): void {
 	if (isBunTestRuntime()) return;
 	startupWatchdogActive = true;
 	startupWatchdogStartedAt = Date.now();
+	armStartupEventLoopHold();
 	armStartupWatchdog();
 }
 
 /** Permanently stop watching: a mode runner now owns the terminal. */
 function stopStartupWatchdog(): void {
 	startupWatchdogActive = false;
+	disarmStartupEventLoopHold();
 	disarmStartupWatchdog();
 }
 
-/** Pause while an interactive prompt legitimately waits on the user. */
+/**
+ * Pause while an interactive prompt legitimately waits on the user.
+ *
+ * Only the reporting timer stops. The event-loop hold stays armed: pausing for
+ * a picker or a readline prompt parks the process on a promise with nothing
+ * ref'd behind it, which is exactly the window the hold exists to cover.
+ */
 function pauseStartupWatchdog(): void {
 	disarmStartupWatchdog();
 }
@@ -671,7 +710,6 @@ async function runInteractiveMode(
 			mode.init({
 				clearInitialTerminalHistory: true,
 				autoStartCollab: joinLink === undefined,
-				recentSessions: startupLease?.recentSessions,
 			}),
 		);
 		startDeferredStartupWork?.();
@@ -888,7 +926,17 @@ async function moveMissingCwdSessionIfNeeded(
 	// move target equals the current project dir. moveTo never chdirs, so the
 	// stale cwd is only a relocation source, not a directory we enter.
 	const manager = await SessionManager.open(session.path, sessionDir, undefined, { initialCwd: sourceCwd });
-	await manager.moveTo(cwd, sessionDir);
+	try {
+		await manager.moveTo(cwd, sessionDir);
+	} catch (err) {
+		if (!(err instanceof SessionMoveRefusedError)) throw err;
+		await manager.close();
+		// Its directory is gone, so it cannot be resumed in place either.
+		throw new SessionResolutionError(
+			err.message,
+			"Close the session in the other omp process, then resume it again.",
+		);
+	}
 	return { status: "moved", manager };
 }
 
@@ -1934,9 +1982,6 @@ export async function runRootCommand(
 				lightTheme: cfgThemeLight.get(settingsInstance),
 			},
 		});
-		setStartupComposerLspServers(
-			!parsedArgs.noLsp && cfgLspEnabled.get(settingsInstance) ? discoverStartupLspServers(cwd, "connecting") : null,
-		);
 
 		let scopedModels = await logger.time(
 			"resolveModelScope",

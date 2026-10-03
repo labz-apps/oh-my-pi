@@ -16,7 +16,7 @@ import {
 	saveModelPreset,
 } from "@oh-my-pi/pi-coding-agent/config/model-presets";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import { cfgModelPresets } from "@oh-my-pi/pi-coding-agent/config/model-settings";
+import { cfgDisabledProviders, cfgModelPresets } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -322,9 +322,13 @@ describe("model presets", () => {
 		const dir = TempDir.createSync("@pi-model-presets-noauth-");
 		tempDirs.push(dir);
 		const noAuth = await AuthStorage.create(path.join(dir.path(), "auth.db"));
-		const registry = new ModelRegistry(noAuth, path.join(dir.path(), "models.yml"));
+		// `opencode-zen` publishes a credential-free tier, so a caller holding no
+		// key still has a runnable model and the automatic pick succeeds. Disable
+		// it to establish the "nothing available" precondition this guards.
+		const settings = Settings.isolated();
+		cfgDisabledProviders.set(settings, ["opencode-zen"]);
+		const registry = new ModelRegistry(noAuth, path.join(dir.path(), "models.yml"), { settings });
 		try {
-			const settings = Settings.isolated();
 			settings.setModelRole("default", SONNET);
 			cfgModelPresets.setEntry(settings, "auto", { modelRoles: {} });
 			const agent = new Agent({
