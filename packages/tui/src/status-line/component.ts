@@ -452,12 +452,17 @@ interface WorktreeContext {
 }
 
 /**
- * Project + worktree-dir names when `cwd` is a linked git worktree, else null.
+ * Project + worktree-dir names when `repository` is a linked git worktree, else null.
  * The project name comes from the shared primary checkout; bare-repo worktrees
  * resolve to the shared `foo.git` dir, so a trailing `.git` is stripped.
+ *
+ * The repository handle is passed in rather than discovered from `cwd`: the
+ * status line resolves the owning repository once per project dir, and every
+ * later walk of the same tree was another synchronous fs pass on the render
+ * path.
  */
-function resolveWorktreeContext(cwd: string): WorktreeContext | null {
-	const worktree = vcs.git(cwd)?.linkedWorktree();
+function resolveWorktreeContext(repository: VcsRepo | null): WorktreeContext | null {
+	const worktree = repository?.asGit()?.linkedWorktree();
 	if (!worktree) return null;
 	const base = path.basename(worktree.primaryRoot);
 	const projectName = base.endsWith(".git") ? base.slice(0, -4) : base;
@@ -790,7 +795,9 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		displayRepository ??= repository;
 		// Only collapse the bare-cwd case: a single-direct-child-repo context
 		// (activeRepo set) renders `<parent> ↳ <child>`, which we leave intact.
-		const worktree = activeRepo ? null : resolveWorktreeContext(effectiveGitCwd);
+		// `repository` already owns `effectiveGitCwd`, so the linked-worktree
+		// probe reads that handle instead of walking the tree a fourth time.
+		const worktree = activeRepo ? null : resolveWorktreeContext(repository);
 		this.#activeRepoCache = {
 			projectDir,
 			activeRepo,
@@ -1561,7 +1568,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		return this.#cachedBranch ?? null;
 	}
 
-	#isDefaultBranch(branch: string, effectiveGitCwd: string): boolean {
+	#isDefaultBranch(branch: string, effectiveGitCwd: string, gitRepository: VcsGitRepo | null): boolean {
 		if (this.#defaultBranchCwd !== effectiveGitCwd) {
 			this.#defaultBranch = undefined;
 			this.#defaultBranchCwd = effectiveGitCwd;
@@ -1571,7 +1578,9 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			this.#defaultBranch = "main";
 			const lookupCwd = effectiveGitCwd;
 			(async () => {
-				const resolved = await vcs.git(lookupCwd)?.defaultBranch();
+				// The repository handle comes from the branch label's own discovery
+				// rather than a fresh walk of the same tree.
+				const resolved = await gitRepository?.defaultBranch();
 				if (this.#disposed || this.#defaultBranchCwd !== lookupCwd) return;
 				if (resolved) {
 					this.#defaultBranch = resolved;
@@ -1685,8 +1694,9 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		if (!this.#gitEnabled()) return null;
 
 		const gitCwd = activeRepoCache.effectiveGitCwd;
-		if (this.#resolveRepository(activeRepoCache)?.kind() !== "git") return null;
-		const branch = this.#getBranchLabel(activeRepoCache, this.#resolveRepository(activeRepoCache));
+		const repository = this.#resolveRepository(activeRepoCache);
+		if (repository?.kind() !== "git") return null;
+		const branch = this.#getBranchLabel(activeRepoCache, repository);
 		const currentContext = branch ? createPrCacheContext(branch, this.#cachedBranchRepoId ?? null) : null;
 
 		if (canReuseCachedPr(this.#cachedPr, this.#cachedPrContext, currentContext)) {
@@ -1702,7 +1712,13 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		}
 
 		// Don't look up if detached, default branch, or already in flight.
-		if (branch === "detached" || this.#isDefaultBranch(branch, gitCwd) || this.#prLookupInFlight) {
+		// The default-branch probe reuses the repository handle the branch label
+		// already resolved instead of discovering the same tree again.
+		if (
+			branch === "detached" ||
+			this.#isDefaultBranch(branch, gitCwd, repository.asGit()) ||
+			this.#prLookupInFlight
+		) {
 			return stalePr ?? null;
 		}
 

@@ -87,16 +87,16 @@ function repoInfoFor(root: string): VcsGitRepoInfo {
 	};
 }
 
+/** Default branch the operational git handle reports; null means "unknown". */
+let operationalDefaultBranch: string | null = null;
+
 function gitHandle(head: VcsHeadState | null): VcsGitRepo {
 	return {
 		headSync: () => head,
 		linkedWorktree: () => null,
+		defaultBranch: async () => operationalDefaultBranch,
 		statusSummary: async (): Promise<GitStatus | null> => ({ staged: 0, unstaged: 0, untracked: 0 }),
 	} as unknown as VcsGitRepo;
-}
-
-function gitWithDefaultBranch(branch: string): VcsGitRepo {
-	return { defaultBranch: async () => branch, linkedWorktree: () => null } as unknown as VcsGitRepo;
 }
 
 function operationalGit(root: string, head: VcsHeadState | null): VcsRepo {
@@ -144,6 +144,7 @@ async function flush(): Promise<void> {
 }
 
 function mockRepos(operational: VcsRepo, display: VcsRepo, root: string): void {
+	operationalDefaultBranch = null;
 	vi.spyOn(vcs, "gitInfo").mockReturnValue(repoInfoFor(root));
 	vi.spyOn(vcs, "git").mockReturnValue(null);
 	vi.spyOn(vcs, "repo").mockReturnValue(operational);
@@ -213,7 +214,7 @@ describe("StatusLineComponent display detector", () => {
 		const operational = operationalGit(root, headFor("main"));
 		const display = displayJj(root, async () => "feature-x", { staged: 0, unstaged: 0, untracked: 0 });
 		mockRepos(operational, display, root);
-		vi.spyOn(vcs, "git").mockReturnValue(gitWithDefaultBranch("main"));
+		operationalDefaultBranch = "main";
 		const run = vi.spyOn(github, "run").mockResolvedValue({ exitCode: 0, stdout: "{}", stderr: "" });
 
 		const component = new StatusLineComponent(makeSession(), statusLineHost);
@@ -233,7 +234,7 @@ describe("StatusLineComponent display detector", () => {
 		const operational = operationalGit(root, headFor("git-branch-name"));
 		const display = displayJj(root, async () => "feature-x", { staged: 0, unstaged: 0, untracked: 0 });
 		mockRepos(operational, display, root);
-		vi.spyOn(vcs, "git").mockReturnValue(gitWithDefaultBranch("main"));
+		operationalDefaultBranch = "main";
 		const run = vi
 			.spyOn(github, "run")
 			.mockResolvedValue({ exitCode: 0, stdout: '{"number":7,"url":"https://example.test/x/7"}', stderr: "" });
