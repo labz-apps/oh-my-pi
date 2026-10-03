@@ -70,13 +70,19 @@ export class ComposerLease {
 export function beginStartupComposer(options: PrepaintComposerOptions = {}): void {
 	if (pendingComposer) throw new Error("A prepaint composer is already active");
 	const cwd = options.cwd ?? process.cwd();
+	coldstartProbe("omp19:begin:enter");
 	const cache = options.cache === false ? undefined : sharedComposerCache();
+	coldstartProbe("omp19:begin:cache-fn");
 	const cached = cache ? cache.read(cwd) : { preferences: undefined, theme: undefined, status: undefined };
+	coldstartProbe("omp19:begin:cache-read");
 	const theme = { ...cached.theme, ...options.theme };
 	initThemeSync(theme.symbolPreset, theme.colorBlindMode, theme.darkTheme, theme.lightTheme);
+	coldstartProbe("omp19:begin:theme");
 	setMagicKeywords(MAGIC_KEYWORDS);
+	coldstartProbe("omp19:begin:keywords");
 	const preferences = { ...COMPOSER_DEFAULTS, ...cached.preferences, ...options.preferences };
 	const welcome: ComposerWelcomeUpdate = { version: options.version ?? "" };
+	coldstartProbe("omp19:begin:pre-ctor");
 	const composer = new Composer({
 		terminal: options.terminal,
 		exit: options.exit,
@@ -85,6 +91,7 @@ export function beginStartupComposer(options: PrepaintComposerOptions = {}): voi
 		welcome,
 		status: cached.status,
 	});
+	coldstartProbe("omp19:begin:ctor-done");
 	try {
 		composer.start({ clearScrollback: true, deferInput: true });
 		coldstartProbe("prepaint-frame");
