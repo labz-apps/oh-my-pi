@@ -16,8 +16,8 @@
  * Leases are directories, because `mkdir` is the one atomic primitive that is
  * available everywhere and needs no daemon. A crashed or killed run leaves its
  * lease behind, which would otherwise wedge the machine as permanently
- * contended, so each lease records its pid and start time and a lease older than
- * {@link LEASE_TTL_MS} whose pid is gone is reclaimed.
+ * contended, so each lease records its pid and a lease whose process is gone is
+ * reclaimed immediately.
  *
  * The lease directory is keyed by machine id and benchmark, never by repo or
  * commit: contention is a property of the hardware, not of the revision.
@@ -27,7 +27,12 @@ import { mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync }
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 
-/** A lease older than this whose process is gone is considered abandoned. */
+/**
+ * A lease older than this is assumed dead regardless of its pid.
+ *
+ * Only a backstop against pid reuse: no benchmark run legitimately lasts six
+ * hours, and a recycled pid must not keep a dead lease alive forever.
+ */
 const LEASE_TTL_MS = 6 * 60 * 60 * 1000;
 
 export interface Lease {
@@ -42,6 +47,38 @@ function leaseRoot(machineId: string, benchmark: string): string {
 	return join(tmpdir(), `omp-bench-lease-${hostname()}`, machineId, benchmark);
 }
 
+/** The pid recorded in a lease, or null when it cannot be read. */
+function leasePid(dir: string): number | null {
+	try {
+		const pid = Number(readFileSync(join(dir, "pid"), "utf8").trim());
+		return Number.isInteger(pid) && pid > 0 ? pid : null;
+	} catch {
+		return null;
+	}
+}
+
+/** Existence check that does not signal the process. */
+function processAlive(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (error) {
+		// EPERM: the process exists, it just belongs to another user.
+		return typeof error === "object" && error !== null && "code" in error && error.code === "EPERM";
+	}
+}
+
+/**
+ * Whether a lease directory can be reclaimed.
+ *
+ * Liveness is decided by the recorded pid, not by age. The previous version
+ * treated *any* lease younger than the TTL as live, so a run killed by a timeout
+ * or a cancelled heartbeat left a directory behind that every later run counted
+ * as contention: on a shared machine that marks every subsequent result
+ * `concurrentRuns > 1`, which the contract keeps as evidence and off the
+ * leaderboard. The symptom is a machine that quietly stops producing publishable
+ * numbers for hours, with the cause in a directory nobody looks at.
+ */
 function isAbandoned(dir: string): boolean {
 	let age: number;
 	try {
@@ -49,18 +86,11 @@ function isAbandoned(dir: string): boolean {
 	} catch {
 		return true;
 	}
-	if (age < LEASE_TTL_MS) return false;
-	try {
-		const pid = Number(readdirSync(dir).length > 0 ? readFileSync(join(dir, "pid"), "utf8").trim() : NaN);
-		// Signal 0 tests for existence without touching the process.
-		if (Number.isInteger(pid) && pid > 0) {
-			process.kill(pid, 0);
-			return false;
-		}
-	} catch {
-		// The pid file is unreadable or the process is gone: reclaimable.
-	}
-	return true;
+	if (age >= LEASE_TTL_MS) return true;
+	const pid = leasePid(dir);
+	// A young lease with no readable pid may be mid-creation, so it is left alone.
+	if (pid === null) return false;
+	return !processAlive(pid);
 }
 
 /**
