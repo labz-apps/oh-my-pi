@@ -1,5 +1,4 @@
 import { classifyModel } from "./compat/taxonomy";
-import MODELS from "./models.json" with { type: "json" };
 import type {
 	Api,
 	EffectiveTokenCost,
@@ -11,6 +10,22 @@ import type {
 	TokenCost,
 	Usage,
 } from "./types";
+
+type BundledModels = typeof import("./models.json");
+
+let bundledModelsCache: BundledModels | undefined;
+
+/**
+ * The bundled catalog is an 11.8 MB JSON document. A static import put its parse
+ * on the CLI's module-load path, so every launch paid ~100 ms for rows that the
+ * model cache (`~/.omp/agent/models.db`) normally serves instead. Parse it on
+ * first read; `require` keeps the document in the compiled bundle and parses it
+ * at most once per process.
+ */
+function bundledModels(): BundledModels {
+	bundledModelsCache ??= require("./models.json") as BundledModels;
+	return bundledModelsCache;
+}
 
 /**
  * Static bundled model registry loaded from `models.json`.
@@ -26,10 +41,11 @@ const modelRegistry = new Map<string, Map<string, Model<Api>>>();
 function getProviderModels(provider: string): Map<string, Model<Api>> | undefined {
 	const cachedModels = modelRegistry.get(provider);
 	if (cachedModels !== undefined) return cachedModels;
-	if (!Object.hasOwn(MODELS, provider)) return undefined;
+	const bundled = bundledModels();
+	if (!Object.hasOwn(bundled, provider)) return undefined;
 
 	const providerModels = new Map<string, Model<Api>>();
-	const rawModels = MODELS[provider as keyof typeof MODELS];
+	const rawModels = bundled[provider as keyof BundledModels];
 	for (const id in rawModels) {
 		// models.json rows are complete Models emitted by generate-models.ts;
 		// consuming them verbatim keeps startup allocation-free.
@@ -43,11 +59,11 @@ function getProviderModels(provider: string): Map<string, Model<Api>> | undefine
 	return providerModels;
 }
 
-export type GeneratedProvider = keyof typeof MODELS;
+export type GeneratedProvider = keyof BundledModels;
 
 /** Whether `provider` has bundled rows in models.json (e.g. a provider id authored in KDL). */
 export function isGeneratedProvider(provider: string): provider is GeneratedProvider {
-	return Object.hasOwn(MODELS, provider);
+	return Object.hasOwn(bundledModels(), provider);
 }
 
 export function getBundledModel<TApi extends Api = Api>(provider: GeneratedProvider, modelId: string): Model<TApi> {
@@ -56,7 +72,7 @@ export function getBundledModel<TApi extends Api = Api>(provider: GeneratedProvi
 }
 
 export function getBundledProviders(): KnownProvider[] {
-	return Object.keys(MODELS) as KnownProvider[];
+	return Object.keys(bundledModels()) as KnownProvider[];
 }
 
 export function getBundledModels(provider: GeneratedProvider): Model<Api>[] {
