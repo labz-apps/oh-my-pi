@@ -107,6 +107,7 @@ import {
 	withTimeout,
 	withFileLock,
 } from "@oh-my-pi/pi-utils";
+import { writeArchive } from "@oh-my-pi/pi-utils/ar";
 import type { AdvisorConfig } from "@oh-my-pi/pi-tui/overlays/advisor-config";
 import { formatUsageResetWindow } from "@oh-my-pi/pi-tui/overlays/usage-display";
 import { loadAdvisorTranscriptCosts } from "../advisor";
@@ -141,23 +142,16 @@ import type {
 	ExtensionCommandContext,
 	ExtensionRunner,
 	ExtensionUIContext,
-	MessageEndEvent,
-	MessageStartEvent,
-	MessageUpdateEvent,
 	PreparedExtension,
 	SessionBeforeBranchResult,
 	SessionBeforeSwitchResult,
 	SessionBeforeTreeResult,
 	SessionStopEventResult,
-	ToolExecutionEndEvent,
-	ToolExecutionStartEvent,
-	ToolExecutionUpdateEvent,
 	ToolInfo,
 	TreePreparation,
-	TurnEndEvent,
-	TurnStartEvent,
 } from "../extensibility/extensions";
 import { emitSessionShutdownEvent, TOP_LEVEL_AGENT } from "../extensibility/extensions";
+import { extensionEventFromSessionEvent } from "../extensibility/extensions/lifecycle-mirror";
 import { ManagedTimers } from "../extensibility/extensions/managed-timers";
 import { createExtensionModelQuery } from "../extensibility/extensions/model-api";
 import type { CompactOptions, ContextUsage } from "../extensibility/extensions/types";
@@ -394,10 +388,11 @@ import {
 	type SessionAdvisorsHost,
 } from "./session-advisors";
 import type { BuildSessionContextOptions, SessionContext } from "./session-context";
-import { getRestorableSessionModels, isTranscriptEntry } from "./session-context";
+import { buildSessionContext, getRestorableSessionModels, isTranscriptEntry } from "./session-context";
 import type { CacheWarmer, CacheWarmingMode, CacheWarmingStatus } from "./cache-warmer";
 import { isUserRequestEntry, transcriptEntryMessage, userTurnDraft } from "@oh-my-pi/pi-tui/chat/transcript-entry";
-import { formatSessionDumpText } from "./session-dump-format";
+import { formatSessionDumpText, formatSubagentDumpText, type SessionDumpArchive } from "./session-dump-format";
+import { collectSubSessions, type SubSession } from "./sub-sessions";
 import type { BranchSummaryEntry, NewSessionOptions } from "./session-entries";
 import { SessionHandoff, type SessionHandoffHost } from "./session-handoff";
 import {
@@ -641,35 +636,6 @@ type SetSessionNameWithTrigger = (
 
 const kPersistedSessionEntryId = Symbol("persistedSessionEntryId");
 type PersistedAssistantMessage = AssistantMessage & { [kPersistedSessionEntryId]?: string };
-
-/**
- * Clone one top-level notification field without ever returning an object owned
- * by the live session. Most values take the lossless structured-clone path. If
- * a third-party metadata object contains functions or other unsupported values,
- * JSON sanitization drops those values; a cyclic/non-JSON value finally degrades
- * to a descriptive string rather than retaining a shared mutable reference.
- */
-function cloneMessageEndNotificationField(value: unknown): unknown {
-	try {
-		return structuredClone(value);
-	} catch {}
-	try {
-		const json = JSON.stringify(value);
-		if (json !== undefined) return JSON.parse(json) as unknown;
-	} catch {}
-	return String(value);
-}
-
-/** Build a detached, notification-only snapshot of an AgentMessage. */
-function cloneMessageEndNotification(message: AgentMessage): AgentMessage {
-	const snapshot: Record<PropertyKey, unknown> = {};
-	for (const key of Reflect.ownKeys(message)) {
-		const descriptor = Object.getOwnPropertyDescriptor(message, key);
-		if (!descriptor?.enumerable) continue;
-		snapshot[key] = cloneMessageEndNotificationField(Reflect.get(message, key));
-	}
-	return snapshot as unknown as AgentMessage;
-}
 
 const INTERRUPTED_THINKING_MIN_CHARS = 60;
 const SESSION_CWD_CHANGE_REJECTED = Symbol("sessionCwdChangeRejected");
@@ -3015,15 +2981,32 @@ export class AgentSession implements SettingsScope {
 		}
 	}
 
-	#queuedExtensionEvents: Promise<void> = Promise.resolve();
+	#queuedExtensionEvents: AgentSessionEvent[] = [];
+	#drainingExtensionEvents = false;
 
-	#queueExtensionEvent(event: AgentSessionEvent): Promise<void> {
-		const emit = async () => {
-			await this.#emitExtensionEvent(event);
-		};
-		const queued = this.#queuedExtensionEvents.then(emit, emit);
-		this.#queuedExtensionEvents = queued.catch(() => {});
-		return queued;
+	#queueExtensionEvent(event: AgentSessionEvent): void {
+		this.#queuedExtensionEvents.push(event);
+		if (this.#drainingExtensionEvents) return;
+		this.#drainingExtensionEvents = true;
+		queueMicrotask(() => void this.#drainExtensionEvents());
+	}
+
+	async #drainExtensionEvents(): Promise<void> {
+		try {
+			while (this.#queuedExtensionEvents.length > 0) {
+				const batch = this.#queuedExtensionEvents;
+				this.#queuedExtensionEvents = [];
+				for (const event of batch) {
+					try {
+						await this.#emitExtensionEvent(event);
+					} catch {
+						// A failed notification must not hold later updates in the queue.
+					}
+				}
+			}
+		} finally {
+			this.#drainingExtensionEvents = false;
+		}
 	}
 
 	async #emitSessionEvent(event: AgentSessionEvent, options: { detachExtensions?: boolean } = {}): Promise<void> {
@@ -3037,9 +3020,9 @@ export class AgentSession implements SettingsScope {
 		}
 		if (event.type === "message_update") {
 			this.#emit(event);
-			// Per-delta hot path: only allocate and chain the serialized extension emit
-			// when something listens (`#emitExtensionEvent` would return immediately).
-			if (this.#extensionRunner?.hasHandlers("message_update")) void this.#queueExtensionEvent(event);
+			// Per-delta hot path: only queue the serialized extension emit when
+			// something listens (`#emitExtensionEvent` would return immediately).
+			if (this.#extensionRunner?.hasHandlers("message_update")) this.#queueExtensionEvent(event);
 			return;
 		}
 		// Deliver synchronously before awaiting extension notifications. This keeps
@@ -4798,138 +4781,12 @@ export class AgentSession implements SettingsScope {
 			// `agent_end` extension notification is emitted from the settled
 			// agent_end maintenance path so `session_stop` control hooks are not
 			// blocked by unrelated notification-only work.
-		} else if (event.type === "turn_start") {
-			const hookEvent: TurnStartEvent = {
-				type: "turn_start",
-				turnIndex: this.#turnIndex,
-				timestamp: Date.now(),
-			};
-			await this.#extensionRunner.emit(hookEvent);
-		} else if (event.type === "turn_end") {
-			const hookEvent: TurnEndEvent = {
-				type: "turn_end",
-				turnIndex: this.#turnIndex,
-				message: event.message,
-				toolResults: event.toolResults,
-			};
-			await this.#extensionRunner.emit(hookEvent);
-			this.#turnIndex++;
-		} else if (event.type === "message_start") {
-			const extensionEvent: MessageStartEvent = {
-				type: "message_start",
-				message: event.message,
-			};
-			await this.#extensionRunner.emit(extensionEvent);
-		} else if (event.type === "message_update") {
-			const extensionEvent: MessageUpdateEvent = {
-				type: "message_update",
-				message: event.message,
-				assistantMessageEvent: event.assistantMessageEvent,
-			};
-			await this.#extensionRunner.emit(extensionEvent);
-		} else if (event.type === "message_end") {
-			// `message_end` is a notification, not a context-rewrite hook. Detach its
-			// payload from agent-owned history so an async observer that mutates the
-			// event after an `await` cannot race mid-run maintenance and enlarge (or
-			// otherwise rewrite) the next provider request after its threshold check.
-			// Explicit `tool_result` / `context` hooks remain the supported mutation
-			// surfaces. Third-party metadata that is not structured-cloneable is
-			// sanitized field-by-field without retaining nested live references.
-			const extensionEvent: MessageEndEvent = {
-				type: "message_end",
-				message: cloneMessageEndNotification(event.message),
-			};
-			await this.#extensionRunner.emit(extensionEvent);
-		} else if (event.type === "tool_execution_start") {
-			const extensionEvent: ToolExecutionStartEvent = {
-				type: "tool_execution_start",
-				toolCallId: event.toolCallId,
-				toolName: event.toolName,
-				args: event.args,
-				intent: event.intent,
-			};
-			await this.#extensionRunner.emit(extensionEvent);
-		} else if (event.type === "tool_execution_update") {
-			const extensionEvent: ToolExecutionUpdateEvent = {
-				type: "tool_execution_update",
-				toolCallId: event.toolCallId,
-				toolName: event.toolName,
-				args: event.args,
-				partialResult: event.partialResult,
-			};
-			await this.#extensionRunner.emit(extensionEvent);
-		} else if (event.type === "tool_execution_end") {
-			const extensionEvent: ToolExecutionEndEvent = {
-				type: "tool_execution_end",
-				toolCallId: event.toolCallId,
-				toolName: event.toolName,
-				result: event.result,
-				isError: event.isError ?? false,
-			};
-			await this.#extensionRunner.emit(extensionEvent);
-		} else if (event.type === "auto_compaction_start") {
-			await this.#extensionRunner.emit({
-				type: "auto_compaction_start",
-				reason: event.reason,
-				action: event.action,
-			});
-		} else if (event.type === "auto_compaction_end") {
-			await this.#extensionRunner.emit({
-				type: "auto_compaction_end",
-				action: event.action,
-				result: event.result,
-				aborted: event.aborted,
-				willRetry: event.willRetry,
-				errorMessage: event.errorMessage,
-				skipped: event.skipped,
-			});
-		} else if (event.type === "auto_retry_start") {
-			await this.#extensionRunner.emit({
-				type: "auto_retry_start",
-				attempt: event.attempt,
-				maxAttempts: event.maxAttempts,
-				delayMs: event.delayMs,
-				errorMessage: event.errorMessage,
-				errorId: event.errorId,
-			});
-		} else if (event.type === "auto_retry_end") {
-			await this.#extensionRunner.emit({
-				type: "auto_retry_end",
-				success: event.success,
-				attempt: event.attempt,
-				finalError: event.finalError,
-				retryErrors: event.retryErrors,
-			});
-		} else if (event.type === "retry_fallback_applied") {
-			await this.#extensionRunner.emit({
-				type: "retry_fallback_applied",
-				from: event.from,
-				to: event.to,
-				role: event.role,
-				reason: event.reason,
-			});
-		} else if (event.type === "retry_fallback_succeeded") {
-			await this.#extensionRunner.emit({
-				type: "retry_fallback_succeeded",
-				model: event.model,
-				role: event.role,
-			});
-		} else if (event.type === "ttsr_triggered") {
-			await this.#extensionRunner.emit({ type: "ttsr_triggered", rules: event.rules });
-		} else if (event.type === "todo_reminder") {
-			await this.#extensionRunner.emit({
-				type: "todo_reminder",
-				todos: event.todos,
-				attempt: event.attempt,
-				maxAttempts: event.maxAttempts,
-			});
-		} else if (event.type === "goal_updated") {
-			await this.#extensionRunner.emit({
-				type: "goal_updated",
-				goal: event.goal,
-				state: event.state,
-			});
+			return;
 		}
+		const mapped = extensionEventFromSessionEvent(event, this.#turnIndex);
+		if (!mapped) return;
+		if (event.type === "turn_end") this.#turnIndex++;
+		await this.#extensionRunner.emit(mapped);
 	}
 
 	/**
@@ -9662,6 +9519,11 @@ export class AgentSession implements SettingsScope {
 		return this.#models.cycleThinkingLevel();
 	}
 
+	/** Lists all selectable effort selectors for the active model. */
+	getAvailableEffortSelectors(): ConfiguredThinkingLevel[] {
+		return this.#models.getAvailableEffortSelectors();
+	}
+
 	/** Reports whether `/fast` is enabled for the active model family. */
 	isFastModeEnabled(): boolean {
 		return this.#models.isFastModeEnabled();
@@ -12577,6 +12439,58 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/**
+	 * Write `/dump all` to an auto-named zip in `os.tmpdir()`: `session.md` (the
+	 * {@link formatSessionAsText} transcript), `llm-request.json` (the
+	 * {@link dumpLlmRequestToTmpDir} payload), and one `subagents/<path>.md` per
+	 * persisted subagent transcript stored next to the session file, nested
+	 * subagents included. Subagents with no messages are skipped. A subagent
+	 * discovery failure still writes the main dump and is reported in
+	 * `subagentError`.
+	 *
+	 * The archive persists on disk and may contain raw context/secrets.
+	 *
+	 * @returns the archive path and member names, or `undefined` when the main
+	 * session has no messages.
+	 */
+	async dumpSessionArchiveToTmpDir(): Promise<SessionDumpArchive | undefined> {
+		const messages = this.messages;
+		if (messages.length === 0) return undefined;
+		const entries: Array<readonly [string, string]> = [["session.md", `${this.formatSessionAsText()}\n`]];
+		try {
+			entries.push(["llm-request.json", await this.#formatLlmRequestJson(messages)]);
+		} catch (error) {
+			// Best-effort like the `/dump` sidecar: the transcripts are still archived.
+			logger.warn("Failed to build LLM request JSON for dump", { error: String(error) });
+		}
+		const sessionFile = this.sessionManager.getSessionFile();
+		let subSessions: Record<string, SubSession> = {};
+		let subagentError: string | undefined;
+		try {
+			if (sessionFile) subSessions = await collectSubSessions(sessionFile);
+		} catch (error) {
+			subagentError = error instanceof Error ? error.message : String(error);
+			logger.warn("Failed to collect subagent transcripts for dump", { sessionFile, error: subagentError });
+		}
+		let subagentCount = 0;
+		for (const [key, sub] of Object.entries(subSessions)) {
+			const context = deobfuscateSessionContext(buildSessionContext(sub.entries, sub.leafId), this.#obfuscator);
+			if (context.messages.length === 0) continue;
+			const text = formatSubagentDumpText({
+				key,
+				messages: context.messages,
+				model: context.models.default,
+				thinkingLevel: context.thinkingLevel,
+				aborted: sub.aborted,
+			});
+			entries.push([`subagents/${key}.md`, `${text}\n`]);
+			subagentCount++;
+		}
+		const filePath = path.join(os.tmpdir(), `omp-dump-${Snowflake.next()}.zip`);
+		await writeArchive(filePath, "zip", entries);
+		return { path: filePath, files: entries.map(([name]) => name), subagentCount, subagentError };
+	}
+
+	/**
 	 * Dump the current session's LLM-facing request context as JSON to a
 	 * auto-named file in `os.tmpdir()`. This is the synchronous
 	 * `convertToLlm`-boundary snapshot — system prompt, tools (wire schemas),
@@ -12591,6 +12505,12 @@ export class AgentSession implements SettingsScope {
 	async dumpLlmRequestToTmpDir(): Promise<string | undefined> {
 		const messages = this.messages;
 		if (messages.length === 0) return undefined;
+		const filePath = path.join(os.tmpdir(), `omp-llm-request-${Snowflake.next()}.json`);
+		await Bun.write(filePath, await this.#formatLlmRequestJson(messages));
+		return filePath;
+	}
+
+	async #formatLlmRequestJson(messages: AgentMessage[]): Promise<string> {
 		const llmMessages = await this.convertMessagesToLlm(messages);
 		const payload = {
 			model: this.agent.state.model ?? null,
@@ -12606,9 +12526,7 @@ export class AgentSession implements SettingsScope {
 			})),
 			messages: llmMessages,
 		};
-		const filePath = path.join(os.tmpdir(), `omp-llm-request-${Snowflake.next()}.json`);
-		await Bun.write(filePath, `${JSON.stringify(payload, null, 2)}\n`);
-		return filePath;
+		return `${JSON.stringify(payload, null, 2)}\n`;
 	}
 
 	/**

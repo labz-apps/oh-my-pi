@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+## [18.5.0] - 2026-10-03
+
+### Added
+
+- Added the public `getSessionOwnersDir()` utility, which returns the profile-independent `~/.omp/run/session-owners` directory that names session ownership leases ([#14095](https://github.com/can1357/oh-my-pi/pull/14095) by [@andrebrait](https://github.com/andrebrait))
+
+### Fixed
+
+- Fixed SQLite error messages doubling every backslash in Windows database paths
+- Fixed corrupt-database recovery failing with `EBUSY` on Windows when several in-process openers of the same store failed at once
+
+## [18.4.12] - 2026-10-02
+
+### Fixed
+
+- Fixed multi-second temp directory removal stalls on Windows by forcing a major GC before the first deletion retry ([#13044](https://github.com/can1357/oh-my-pi/pull/13044) by [@jchanghong023](https://github.com/jchanghong023)).
+
 ## [18.4.11] - 2026-10-02
 
 ### Added
