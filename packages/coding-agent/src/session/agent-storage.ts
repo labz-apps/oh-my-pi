@@ -154,6 +154,7 @@ let cancelExitCleanup: (() => void) | undefined;
  */
 export class AgentStorage {
 	#db: Database;
+	#dbPath: string;
 	#authStore: AuthCredentialStore;
 
 	#listSettingsStmt: Statement;
@@ -173,6 +174,7 @@ export class AgentStorage {
 
 	private constructor(db: Database, dbPath: string) {
 		this.#db = db;
+		this.#dbPath = dbPath;
 		this.#autoPerfBackfill = dbPath === getAgentDbPath();
 
 		this.#initializeSchema();
@@ -750,6 +752,15 @@ ON CONFLICT(model_key) DO UPDATE SET
 	 */
 	get authStore(): AuthCredentialStore {
 		return this.#authStore;
+	}
+
+	/**
+	 * The SQLite file this storage was opened on. Lets a host that already holds
+	 * this connection decide whether a second component wants the same store
+	 * (see {@link AgentStorage.authStore}) instead of opening its own.
+	 */
+	get dbPath(): string {
+		return this.#dbPath;
 	}
 
 	/**

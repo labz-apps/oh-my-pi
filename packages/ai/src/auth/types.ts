@@ -381,6 +381,15 @@ export type AuthStorageOptions = {
 	 * - `"broker http://omp.internal:8765"`
 	 */
 	sourceLabel?: string;
+	/**
+	 * Whether closing this `AuthStorage` (including a `replaceStore` swap) also
+	 * closes the credential store. Default `true`.
+	 *
+	 * Set `false` when the store was opened by the caller and handed in — a host
+	 * process that already needs the same SQLite connection for something else.
+	 * Closing it would pull the connection out from under that other holder.
+	 */
+	ownsStore?: boolean;
 };
 
 /**
