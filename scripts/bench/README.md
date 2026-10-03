@@ -1,0 +1,239 @@
+# Benchmark harness
+
+Cold-start and time-to-render measurement for the `oh-my-pi` fork. This directory
+is the producer side of the measurement contract: it emits result documents, and
+`labz-apps/omp-leaderboard` renders them. Nothing here computes a delta or
+edits a number.
+
+## The one command
+
+```bash
+bun scripts/bench/cold-start.ts --runs 20 --json > cold-start-<sha>.json
+```
+
+That is the whole publishable path for cold start. The result document goes
+straight into the leaderboard, unmodified:
+
+```bash
+# in labz-apps/omp-leaderboard, once the pull request has merged
+npm run import-result -- --file ~/cold-start-<sha>.json --pr <number> --pr-title "<title>"
+npm run verify
+```
+
+Quick mode, for deciding whether an idea is worth a full run:
+
+```bash
+bun scripts/bench/cold-start.ts --quick
+```
+
+`--quick` and `--warm-cache` are recorded in the result file, so an indicative
+run can never be silently presented as a publishable one.
+
+## Preconditions
+
+The harness refuses to guess. Each of these was a real failure mode while
+bringing it up, and each is stated here rather than discovered again.
+
+| Requirement | Why | Check |
+| --- | --- | --- |
+| `bun >= 1.4` on `PATH` | `packageManager` is `bun@>=1.4`; every script is `bun ...`. | `bun --version` |
+| `bun install` has run | Workspace links under `node_modules/@oh-my-pi/*` must point at *this* checkout. A `node_modules` symlinked from another worktree resolves `@oh-my-pi` to that other checkout's sources and produces a syntactically valid mixture of two revisions. | `bun run ci:test:smoke` |
+| `prepare` has run | `bun install` generates `packages/coding-agent/src/export/html/tool-views.generated.js` (gitignored). Without it the CLI exits 1 with `Cannot find module './tool-views.generated.js'`. | file exists |
+| Rust natives built | `packages/natives/native/pi_natives.linux-x64-*.node` (gitignored). The `PI_TIMING` chain path hard-fails without them; the interactive first-frame path degrades instead. | `bun --cwd=packages/natives run build` |
+| No `hyperfine` needed | Deliberate. See below. | — |
+
+### No hyperfine
+
+`packages/coding-agent/scripts/bench-guard.ts` shelled out to `hyperfine` and
+read `median` (falling back to `mean`). The contract requires p50 **and** p95
+for every metric and says a mean is not acceptable, because a change that leaves
+the median alone and doubles the tail is a regression a user feels. A
+median-only guard is blind to exactly that. The loop here owns the statistics
+(`lib/stats.ts`), which also removes an external binary from the set of things
+that must be installed and version-matched before a number is publishable.
+
+`bench-guard.ts` is left in place and untouched; it is a separate local guard,
+and it predates this contract.
+
+## What is measured, and the frame-vs-chain question
+
+This is the question the contract could not previously answer, so it is answered
+here in full, with the measurements that settle it.
+
+**They are different intervals, and only one of them is "first interactive
+frame".**
+
+### `firstInteractiveFrameMs` — the publishable cold-start number
+
+Spawn to the first screen that shows a painted input surface (the composer
+border), gated on that frame then answering a keystroke. This matches the
+contract's definition of `cold-start`.
+
+Measured by spawning under a real pty with `Bun.Terminal`, the same mechanism
+`packages/coding-agent/test/fatal-stderr-pty.test.ts` uses. This is not
+optional: `main.ts` computes
+`autoPrint = (pipedInput !== undefined || !stdinIsTerminal) && !print && mode === undefined`,
+so with pipes — which is how `bench-guard.ts` ran under hyperfine — the process
+takes the auto-print path and calls `exitWithoutTerminal()` about a hundred lines
+before the interactive branch. It exits 2 without painting anything. The old
+guard's "boot median" was the wall clock of that early abort.
+
+### `prePaintChainMs` — reported, never labelled a frame
+
+Spawn to a clean exit under `PI_TIMING=x`. In the interactive branch that exit
+is at `main.ts`, immediately after `logger.printTimings()` and **before**
+`runInteractiveMode()` is called. At that point the TUI component tree is never
+mounted, no paint has happened, and `Terminal.#attachInput()` has not run, so
+raw mode is never enabled and the tty is never owned. It measures *launch to
+pre-paint chain completion*.
+
+It is kept because it is cheap, terminates on its own, and is the sharpest cheap
+regression signal. It is a second metric in the same document, never the headline.
+
+### Why the two differ so much, and what that means
+
+Measured back to back on one machine in one session:
+
+| Metric | p50 | What it is |
+| --- | --- | --- |
+| `firstInteractiveFrameMs` | ~350 ms | What a user waits for. |
+| `prePaintChainMs` | ~1540 ms | All startup work before the TUI would mount. |
+
+The gap is not measurement error. It is the **speculative prepaint composer**
+(`packages/tui/src/terminal.ts`, the `deferInput` split): the app paints an
+early frame and deliberately defers input ownership while the rest of startup
+blocks the event loop. So the real interactive path is *faster to first frame*
+than the `PI_TIMING` path, because `PI_TIMING` changes what runs:
+
+- `packages/coding-agent/src/cli.ts` gates the prepaint composer on
+  `!process.env.PI_TIMING`, so setting `PI_TIMING` **removes the early paint**.
+- `PI_TIMING` also adds tree rendering to stderr before the exit.
+
+So `PI_TIMING=x` is not merely a different stopping point — it is a different
+program. A `PI_TIMING`-derived number must never be published as a first
+interactive frame. That is now structural: the harness runs two separate spawn
+series and names them accordingly.
+
+### The proxy terms, stated explicitly
+
+| Term | Measured by | Covered? |
+| --- | --- | --- |
+| Process launch | parent-side `performance.now()` around `Bun.spawn` | yes |
+| First painted frame with an input surface | pty `data` event where the composer border appears | yes |
+| Frame responds to input | keystroke written into the pty, then the next terminal write | yes, per sample |
+| Full pre-paint chain | `PI_TIMING=x` clean exit | yes, reported separately |
+| Frame *content* correctness | — | **not measured.** A frame is detected by a marker, not by asserting pixels. |
+
+## Time to render
+
+```bash
+bun scripts/bench/time-to-render.ts --runs 200 --json > ttr-<sha>.json
+```
+
+Input event to painted frame, sampled inside one live pty session, p50 and p95.
+
+## The whole suite
+
+```bash
+bun scripts/bench/run-all.ts --full --json
+```
+
+Runs every benchmark in this directory, writes one result document per benchmark
+to `--out-dir`, and prints a manifest on stdout. Benchmarks that are not present
+yet are skipped and named in the manifest, so the command does not need editing
+as the suite grows.
+
+## Series rules
+
+A result is comparable only within one series: **one benchmark, one machine
+`id`, one build type.** `machine.id` is derived only from durable hardware and OS
+facts (`platform-arch-cpuModel-physicalCores`), never a hostname or boot id, so
+a series survives a reboot. Memory is deliberately excluded from the id because
+it is reported with small variations across boots and a changed id would split
+one series in two.
+
+Build type is pinned per series. The publishable series measures a **source run
+under `bun`** (`buildType: "source-run-bun"` in `harness.config`). The compiled
+`omp` binary is a different program and needs its own series; a compiled-binary
+series cannot carry the module-load profile, because every module is pre-bundled
+into `bunfs` and `module-timer`'s `onLoad` never fires.
+
+### Percentiles
+
+Nearest-rank, no interpolation, fixed in `lib/stats.ts`:
+
+```
+rank  = ceil(p / 100 * n)   clamped to [1, n]
+value = sorted[rank - 1]
+```
+
+It always returns an observed sample, so `p95 got worse` can be checked against
+the raw samples by inspection. Changing the estimator is a semantic change to
+the harness and must bump `HARNESS_VERSION`.
+
+### Failed samples
+
+A sample that does not produce a measurement is counted, reported with its
+reason, and by default fails the run rather than being dropped:
+
+```
+2 of 4 samples failed (no-paint x2); refusing to publish a number built from 2.
+Pass --max-failures <n> to accept a partial run.
+```
+
+A harness that quietly discards the runs that broke is how a tail regression
+gets published as an improvement. `--max-failures` exists for local debugging
+and marks the run as partial.
+
+## The module-init profile (`--profile`)
+
+`--profile` adds `--preload packages/utils/src/module-timer.ts` to the
+`PI_TIMING=x` series and records the resulting profile under `diagnostics`. It
+reuses the profiler that already exists; there is deliberately no second one.
+
+**The profiled run's wall clock is not a cold-start number.** `module-timer.ts`
+intercepts every TS module, re-reads it synchronously, and regex-scans its
+imports, which is why profiled runs are much slower than unprofiled ones. Only
+the unprofiled series is published.
+
+Without the preload, `logger.printTimings()` reports
+`(before instrumentation): <n>ms [runtime init + module load]`, which on this
+machine is roughly **85% of the whole boot** — the phase the tree structurally
+cannot see. With the preload, `spliceModuleLoadBuffer()` back-extends the root
+window over the static-import phase and the figure collapses to the `(modules)`
+summary. Anyone reading a `PI_TIMING` tree without the preload should read that
+line first.
+
+### Documented coverage limits of `module-timer.ts`
+
+These come from its own header and are repeated here so a reader does not
+mistake the profile for the whole graph:
+
+- **TS/TSX only.** `node_modules` CommonJS `.js`/`.cjs` is left to Bun's
+  default path, because intercepting it forces ESM and breaks default-export
+  detection.
+- **Dev/source runs only.** In the compiled binary every module is pre-bundled
+  into `bunfs`, so `onLoad` never fires.
+- **A preload is required.** Bun reads the entire statically reachable graph
+  before evaluating any module, so hooks installed from inside that graph cannot
+  observe its own loading.
+- **A module that throws before its final statement records no end marker**, so
+  it is missing from the profile entirely rather than reported as fast.
+- **Child edges are a text scan** of `import`/`export ... from` and
+  `import(...)`, resolved with `Bun.resolveSync`. It is an observer only and can
+  miss edges Bun itself resolves.
+- `PI_TIMING=full` is needed to list every module-load entry; the default shows
+  the top N.
+
+## Files
+
+| File | Role |
+| --- | --- |
+| `cold-start.ts` | The publishable cold-start entry point. |
+| `time-to-render.ts` | Input-to-paint entry point. |
+| `run-all.ts` | The suite entry point. |
+| `lib/pty.ts` | Real-pty sample runner; timing-tree parser. |
+| `lib/stats.ts` | Percentiles and the estimator's rationale. |
+| `lib/provenance.ts` | Machine, versions, commit, run id. |
+| `lib/result.ts` | Result document assembly and pre-import checks. |
+| `lib/cli.ts` | Shared flags and the sample loop. |
