@@ -59,6 +59,7 @@ import {
 	formatNumber,
 	getProjectDir,
 	isEnoent,
+	isTerminalHeadless,
 	logger,
 	postmortem,
 	prompt,
@@ -66,6 +67,7 @@ import {
 	setProjectDir,
 } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
+import { keepEventLoopAlive } from "@oh-my-pi/pi-utils/event-loop-keepalive";
 import { restartArgv } from "../cli/flag-tables";
 import type { CollabGuestLink } from "../collab/guest";
 import { CollabController } from "../collab/controller";
@@ -2768,8 +2770,28 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#scheduleLoopAutoSubmit();
 		this.#scheduleGoalContinuation();
 
+		// Two different jobs, so two different timers.
+		//
+		// `EventLoopKeepalive` is unref'd on purpose: it only stops Bun from
+		// busy-waiting while we sit here, and must never be what keeps the process
+		// alive.
+		//
+		// A headful launch has a stdin reader, and that read is what holds the loop
+		// across this park. A headless one has nothing: no terminal owns the
+		// viewport and nobody reads stdin, so the loop empties, `beforeExit` runs,
+		// and `omp launch` ends in reportUnsettledEntry's "the event loop drained"
+		// exit instead of sitting at its prompt. That is not a hypothetical — CI
+		// sets PI_TEST_RUNTIME for every chunk (scripts/ci-test-ts.ts), and the
+		// `interactive startup changelog PTY smoke` case spawns the entry with it,
+		// which is exactly how it died there. Hold the loop for as long as we are
+		// waiting, and only when nothing else can.
+		const releaseHeadlessHold = isTerminalHeadless() ? keepEventLoopAlive() : undefined;
 		using _ = new EventLoopKeepalive();
-		return await promise;
+		try {
+			return await promise;
+		} finally {
+			releaseHeadlessHold?.();
+		}
 	}
 
 	#scheduleLoopAutoSubmit(): void {
