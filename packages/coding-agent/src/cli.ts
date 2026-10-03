@@ -27,7 +27,6 @@ import {
 	setProfile,
 	VERSION,
 } from "@oh-my-pi/pi-utils/dirs";
-import { keepEventLoopAlive } from "@oh-my-pi/pi-utils/event-loop-keepalive";
 
 import { declareWorkerHostEntry, installWorkerInbox, isWorkerHostSelector } from "@oh-my-pi/pi-utils/worker-host";
 import { extractProfileFlags } from "./cli/profile-bootstrap";
@@ -633,28 +632,11 @@ if (isProcessEntry || !Bun.isMainThread) {
 	// terminal lifetime; help/version/subcommand launches never start one. See #10930. The
 	// registration lives for the process — a one-shot entry exits right after runCli settles.
 	postmortem?.registerStdioDisconnectHandling();
-	// Hold the event loop for as long as this command is pending — released when
-	// the entry settles, which is the exact window `reportUnsettledEntry` below
-	// watches. Nothing else guarantees a ref across it: the prepaint composer is
-	// skipped for `launch`, and under PI_TEST_RUNTIME (set by `ci-test-ts` for
-	// every chunk) the terminal is headless, so nothing paints and nothing reads
-	// stdin either. Startup then runs purely on whatever refs its own awaits
-	// happen to hold, and a promise resolved by an unref'd timer holds none — so
-	// the loop can empty mid-launch and `omp` exits with a one-line diagnostic
-	// instead of a running TUI.
-	//
-	// The cost of holding: a command that never settles no longer ends by
-	// draining. That is the better failure. The unref'd startup watchdog keeps
-	// naming the deepest phase every 10s while startup is watched, so a stuck
-	// launch reports itself instead of vanishing.
-	const releaseEntryHold = isProcessEntry ? keepEventLoopAlive() : undefined;
 	const entry = runCli(process.argv.slice(2));
 	postmortem?.reportUnsettledEntry(entry, () => runningCommand);
-	entry
-		.catch(async error => {
-			// Failure boundary: inspector/postmortem is irrelevant to successful startup.
-			const { fatal } = await import("@oh-my-pi/pi-utils/postmortem");
-			fatal(error);
-		})
-		.finally(() => releaseEntryHold?.());
+	entry.catch(async error => {
+		// Failure boundary: inspector/postmortem is irrelevant to successful startup.
+		const { fatal } = await import("@oh-my-pi/pi-utils/postmortem");
+		fatal(error);
+	});
 }
