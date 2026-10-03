@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `omp` silently exiting part-way through startup, printing one "ended before completing" line instead of opening its prompt
+
 ## [18.5.0] - 2026-10-03
 
 ### Breaking Changes

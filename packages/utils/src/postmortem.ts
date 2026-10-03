@@ -422,6 +422,14 @@ export function reportUnsettledEntry(work: Promise<unknown>, describe?: () => st
 		const command = describe?.();
 		const subject = command ? `\`${APP_NAME} ${command}\`` : "command";
 		const message = `${subject} ended before completing: the event loop drained while it was still pending (rerun with PI_DEBUG_STARTUP=1 to see the last phase reached)`;
+		// Same rule as every other postmortem print path (exitAfterFatal,
+		// emergencyTerminalRestore): put fd 2 back on the real terminal first.
+		// The stderr guard points fd 2 at the omp log file while the TUI owns the
+		// viewport, and a launch can reach this handler with the guard armed — in
+		// which case the one line that explains the failure, plus the
+		// PI_DEBUG_STARTUP markers and the "Still starting after Ns" watchdog
+		// lines it points at, land in a log file nobody is reading.
+		restoreTerminalStderr();
 		try {
 			fs.writeSync(2, `${APP_NAME}: ${message}\n`);
 		} catch {}
