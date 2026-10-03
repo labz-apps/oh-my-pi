@@ -120,9 +120,45 @@ series and names them accordingly.
 | --- | --- | --- |
 | Process launch | parent-side `performance.now()` around `Bun.spawn` | yes |
 | First painted frame with an input surface | pty `data` event where the composer border appears | yes |
-| Frame responds to input | keystroke written into the pty, then the next terminal write | yes, per sample |
+| Frame responds to input | keystroke written into the pty, then the next **completed paint frame** | yes, per sample |
 | Full pre-paint chain | `PI_TIMING=x` clean exit | yes, reported separately |
 | Frame *content* correctness | — | **not measured.** A frame is detected by a marker, not by asserting pixels. |
+
+### How a frame boundary is detected, and why "the next byte" is wrong
+
+Every paint is bracketed by the TUI's synchronized-output wrapper,
+`\x1b[?2026h` … `\x1b[?2026l` (`packages/tui/src/tui.ts`, `PAINT_BEGIN` /
+`PAINT_END`). The harness forces that wrapper on with `PI_TUI_SYNC_OUTPUT=1` and
+scans the raw pty stream for the closing half. This is the whole instrument, and
+it is deliberately *outside* the process: nothing is added to the startup or
+render path, which is what the contract's run-integrity section asks for.
+
+Begin and end are counted as a **pair**, because the TUI also writes an
+unconditional `\x1b[?2026l` while tearing the terminal down
+(`packages/tui/src/terminal.ts`), outside any frame. Counting that would invent
+a frame at exit.
+
+The obvious cheaper implementation — resolve when the pty produces *any* new byte
+— is wrong, and it was the implementation in the first version of this harness.
+A pty's line discipline echoes the keystroke straight back, so that loop measures
+the terminal, not the app. The symptom is unmistakable once you look for it:
+
+| | `inputToPaintMs` p50 | p95 | spread over 5 samples |
+| --- | --- | --- | --- |
+| next byte (harness `1`) | 2.102 ms | 2.109 ms | **0 ms** |
+| completed paint frame (harness `2`) | 33.1 ms | 195.4 ms | 164 ms |
+
+A p50 and p95 that agree to three decimal places with zero spread is not a fast
+UI; it is the 2 ms poll interval being reported back. The same bug made the
+cold-start input gate vacuous — a frame that ignores input entirely still passed
+it — and `inputRoundTripMs` was reporting 2 ms where the honest figure is
+seconds, because the prepaint composer deliberately defers input ownership after
+painting. Both now use the frame boundary, and a keystroke that produces no frame
+within the budget fails the sample (`no-paint-response`) instead of quietly
+falling back to the echo path.
+
+Because this changes what a sample *is*, `HARNESS_VERSION` is `2`, and a `2`
+result is not comparable with a `1` result.
 
 ## Time to render
 
@@ -131,6 +167,12 @@ bun scripts/bench/time-to-render.ts --runs 200 --json > ttr-<sha>.json
 ```
 
 Input event to painted frame, sampled inside one live pty session, p50 and p95.
+Each sample is one keystroke written into the pty, resolved when the paint frame
+that answers it **completes** — see
+[How a frame boundary is detected](#how-a-frame-boundary-is-detected-and-why-the-next-byte-is-wrong).
+The first five keystrokes are discarded so the measured samples describe
+time-to-render rather than the session's own input-attach; the count is recorded
+as `discardedSettlingSamples`.
 
 ## The whole suite
 
@@ -159,6 +201,13 @@ measuring the packaging rather than the change; the value is part of the series
 key, not a note. The harness only produces `source`. A compiled-binary series
 also cannot carry the module-load profile, because every module is pre-bundled
 into `bunfs` and `module-timer`'s `onLoad` never fires.
+
+Two further things are held constant by construction rather than by convention,
+and both are cleared from the inherited environment so a surrounding shell
+cannot change them: the terminal geometry (`120x30`, `xterm-256color`, `NO_COLOR`)
+and `PI_TUI_SYNC_OUTPUT=1`, which fixes the paint bracket the input samples are
+timed against. An inherited `PI_NO_SYNC_OUTPUT=1` would otherwise leave the
+harness with no frame boundary at all.
 
 ### Provenance the schema cannot infer
 

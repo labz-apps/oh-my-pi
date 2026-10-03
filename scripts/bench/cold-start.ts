@@ -151,6 +151,9 @@ async function measure(
 			quick: args.quick,
 			percentileEstimator: "nearest-rank",
 			terminal: { cols: 120, rows: 30, term: "xterm-256color" },
+			// The input gate is part of the headline number, so how it resolves is
+			// recorded with it.
+			paintBoundary: "dec-2026-synchronized-output-bracket",
 		},
 		metrics,
 		diagnostics,

@@ -22,10 +22,12 @@
  * Two distinct intervals, kept distinct because conflating them is the failure
  * this file exists to prevent:
  *
- * 1. `firstInteractiveFrameMs` — spawn until the app's **first write to the
- *    terminal**, gated on that frame then *answering an input event*. The gate
+ * 1. `firstInteractiveFrameMs` — spawn until the screen shows a painted input
+ *    surface, gated on that frame then *answering an input event*. The gate
  *    matters: a paint that ignores input is not an interactive frame. Matches
- *    the contract's definition of `cold-start`.
+ *    the contract's definition of `cold-start`. Both halves resolve on a
+ *    completed paint frame (`PaintTracker`); resolving on the next byte would
+ *    let the pty's own keystroke echo satisfy the gate.
  * 2. `prePaintChainMs` — spawn until the process exits 0 under `PI_TIMING=x`,
  *    which in the interactive branch happens at `main.ts` right after
  *    `logger.printTimings()` and **before** `runInteractiveMode()` is called.
@@ -65,6 +67,18 @@ export const TERM_ROWS = 30;
 const COMPOSER_MARKER = "╰─";
 
 /**
+ * Synchronized-output frame bracket (DEC private mode 2026).
+ *
+ * The TUI wraps every paint in `\x1b[?2026h` … `\x1b[?2026l`
+ * (`packages/tui/src/tui.ts`, `PAINT_BEGIN` / `PAINT_END`), and that bracket is
+ * the only frame boundary observable from outside the process without putting
+ * instrumentation on the render path. `buildEnv` forces it on, so the bracket is
+ * present on every paint regardless of what the emulated terminal advertises.
+ */
+const SYNC_BEGIN = "\x1b[?2026h";
+const SYNC_END = "\x1b[?2026l";
+
+/**
  * Env keys scrubbed from every sample. A measurement must not depend on, or
  * leak, credentials: a machine with an API key cached would measure a
  * different boot than one without. Mirrors
@@ -94,6 +108,12 @@ const CLEARED_KEYS = [
 	"BUN_ENV",
 	"NODE_ENV",
 	"OMP_TUI_DEBUG",
+	// Synchronized-output selection is a measurement choice, not an inherited
+	// one: if the surrounding shell opted out, the frame bracket this harness
+	// times against would be absent and every input sample would be unmeasurable.
+	"PI_TUI_SYNC_OUTPUT",
+	"PI_NO_SYNC_OUTPUT",
+	"PI_FORCE_SYNC_OUTPUT",
 ] as const;
 
 /** One parsed row of the `PI_TIMING` module-load profile. */
@@ -110,6 +130,12 @@ export interface InteractiveFrameSample {
 	firstTerminalWriteMs: number;
 	/** keystroke -> the next terminal write, proving the frame answers input. */
 	inputRoundTripMs: number;
+	/**
+	 * Paint frames observed before the keystroke was written. Evidence that the
+	 * synchronized-output bracket this harness times against was actually
+	 * present: a zero here would mean the frame counter never ran.
+	 */
+	framesPaintedBeforeInput: number;
 	/** True when the painted screen showed the composer input surface. */
 	composerPainted: boolean;
 	capabilityProbesSeen: number;
@@ -180,6 +206,13 @@ function buildEnv(options: RunOptions, home: string): Record<string, string | un
 	env.NO_COLOR = "1";
 	env.COLUMNS = String(TERM_COLS);
 	env.LINES = String(TERM_ROWS);
+	// Force the synchronized-output frame bracket on. This is what makes "input
+	// to painted frame" measurable from outside the process: every paint becomes
+	// delimited, so input-to-paint can be timed to a frame boundary instead of to
+	// the first byte the terminal happens to return. It is held constant across
+	// the whole series and recorded in the result document, so it can never
+	// differ between two runs being compared.
+	env.PI_TUI_SYNC_OUTPUT = "1";
 	if (options.piTiming) env.PI_TIMING = options.piTiming;
 	return env;
 }
@@ -230,14 +263,104 @@ export function parseTimingTree(raw: string): Omit<PrePaintChainSample, "wallMs"
 
 /** One input-to-paint observation. */
 export interface InputSample {
-	/** keystroke written -> the terminal write that answers it. */
+	/** keystroke written -> the paint frame that answers it. */
 	latencyMs: number;
+}
+
+/**
+ * Counts completed paint frames in the raw pty stream.
+ *
+ * Timing "input to painted frame" needs a *frame boundary*, not "a byte
+ * arrived". A pty makes byte-level detection the easy mistake and it is wrong:
+ * the terminal line discipline echoes the keystroke straight back in
+ * microseconds, so a byte-counting loop times the tty, not the app, and reports
+ * the same flat ~2 ms for every sample no matter what the render path is doing.
+ * A flat p50/p95 with a spread of 0 ms is that bug's signature, not a fast UI.
+ *
+ * Two details make the bracket safe to count:
+ *
+ * - The scan runs over the *unstripped* stream, because `stripAnsi` would remove
+ *   the bracket along with every colour sequence.
+ * - Begin and end are tracked as a pair. The TUI writes an unconditional
+ *   `\x1b[?2026l` while tearing the terminal down
+ *   (`packages/tui/src/terminal.ts`), outside any frame, and counting that would
+ *   invent a frame at exit.
+ */
+class PaintTracker {
+	#frames = 0;
+	#inside = false;
+	#tail = "";
+	#lastEndAt = 0;
+	readonly #waiters = new Set<(at: number) => void>();
+
+	/** Frames completed so far. */
+	get frames(): number {
+		return this.#frames;
+	}
+
+	/** Timestamp of the most recent completed frame; 0 before the first one. */
+	get lastEndAt(): number {
+		return this.#lastEndAt;
+	}
+
+	feed(chunk: string): void {
+		// Retained so a marker split across two reads is still matched.
+		const window = this.#tail + chunk;
+		let cursor = 0;
+		let firstEndAt = 0;
+		for (;;) {
+			const begin = window.indexOf(SYNC_BEGIN, cursor);
+			const end = window.indexOf(SYNC_END, cursor);
+			if (begin === -1 && end === -1) break;
+			if (begin !== -1 && (end === -1 || begin < end)) {
+				this.#inside = true;
+				cursor = begin + SYNC_BEGIN.length;
+				continue;
+			}
+			if (this.#inside) {
+				this.#inside = false;
+				const now = performance.now();
+				this.#frames += 1;
+				this.#lastEndAt = now;
+				if (firstEndAt === 0) firstEndAt = now;
+			}
+			cursor = end + SYNC_END.length;
+		}
+		this.#tail = window.slice(-Math.max(SYNC_BEGIN.length, SYNC_END.length));
+		if (firstEndAt === 0) return;
+		// Iterating the live set is safe: resolving a promise only schedules its
+		// continuation, so no waiter unregisters during this loop.
+		for (const waiter of this.#waiters) waiter(firstEndAt);
+	}
+
+	/**
+	 * Resolve with the timestamp of the first frame that completes *after* the
+	 * caller's keypress, or 0 if none completes within the budget.
+	 *
+	 * `framesBefore`/`tKey` exclude a repaint that was already in flight when the
+	 * key was written: such a frame does not answer the keystroke, and charging
+	 * it to one would report a latency the user never experienced.
+	 */
+	async nextFrameAfter(framesBefore: number, tKey: number, timeoutMs: number): Promise<number> {
+		if (this.#frames > framesBefore && this.#lastEndAt > tKey) return this.#lastEndAt;
+		const { promise, resolve } = Promise.withResolvers<number>();
+		const timer = setTimeout(() => resolve(0), timeoutMs);
+		this.#waiters.add(resolve);
+		try {
+			return await promise;
+		} finally {
+			clearTimeout(timer);
+			this.#waiters.delete(resolve);
+		}
+	}
 }
 
 /** A live interactive session, already past its first interactive frame. */
 export interface InteractiveSession {
 	firstInteractiveFrameMs: number;
 	firstTerminalWriteMs: number;
+	/** Paint frames completed since the session opened. */
+	framesPainted(): number;
 	/** Write one keystroke and resolve when the app paints in response. */
 	press(key: string): Promise<InputSample>;
 	close(): Promise<void>;
@@ -260,7 +383,7 @@ interface SessionHandles {
 	proc: Child;
 	/** Per-sample HOME, so dispose can remove the cold cache it created. */
 	home: string;
-	bytesWritten(): number;
+	paints: PaintTracker;
 	firstWriteAt: number;
 	composerAt: number;
 	probesSeen: number;
@@ -278,9 +401,9 @@ interface SessionHandles {
 async function startInteractive(options: RunOptions): Promise<SessionHandles> {
 	const home = options.coldCache ? mkdtempSync(join(tmpdir(), "omp-bench-home-")) : tmpdir();
 	const responder = new TerminalQueryResponder();
+	const paints = new PaintTracker();
 	const decoder = new TextDecoder();
-	let bytes = 0;
-	/** Stripped tail, so a marker split across chunks is still matched. */
+	/** Stripped tail, so the composer marker is still matched across a chunk split. */
 	let plainTail = "";
 	let firstWriteAt = 0;
 	let composerAt = 0;
@@ -297,8 +420,9 @@ async function startInteractive(options: RunOptions): Promise<SessionHandles> {
 		data(_t, data: Uint8Array) {
 			if (data.length === 0) return;
 			if (!firstWriteAt) firstWriteAt = performance.now();
-			bytes += data.length;
 			const text = decoder.decode(data, { stream: true });
+			// Frames are counted on the raw stream, before any stripping.
+			paints.feed(text);
 			// The first interactive frame is the first screen that shows an input
 			// surface, not merely the first byte: a partial frame the user cannot
 			// type into is not interactive. Un-stripped text is useless here because
@@ -337,7 +461,7 @@ async function startInteractive(options: RunOptions): Promise<SessionHandles> {
 		terminal,
 		proc,
 		home,
-		bytesWritten: () => bytes,
+		paints,
 		firstWriteAt,
 		composerAt,
 		probesSeen,
@@ -362,25 +486,27 @@ async function startInteractive(options: RunOptions): Promise<SessionHandles> {
 	return handles;
 }
 
-/** Write one keystroke and resolve on the terminal write that answers it. */
+/**
+ * Write one keystroke and resolve when the app **paints in response**.
+ *
+ * Resolution is on a completed paint frame, not on the next byte. Waiting on the
+ * event rather than sleeping is load-bearing: a fixed delay would either
+ * over-report every sample or race the repaint. The repo's own pty test carries
+ * the comment to match.
+ *
+ * A frame that never arrives is a failed sample, not a slow one. Falling back to
+ * "some byte eventually moved" would put the terminal's own echo back into the
+ * measurement, which is the specific failure this function exists to prevent.
+ */
 async function pressAndAwait(handles: SessionHandles, key: string, timeoutMs: number): Promise<InputSample> {
-	const bytesBefore = handles.bytesWritten();
+	const framesBefore = handles.paints.frames;
 	const tKey = performance.now();
 	handles.terminal.write(key);
-	const latencyMs = await Promise.race([
-		(async () => {
-			// Waiting on the event rather than sleeping is load-bearing: a fixed
-			// delay would either over-report every sample or race the repaint. The
-			// repo's own pty test carries the comment to match.
-			while (handles.bytesWritten() === bytesBefore) await Bun.sleep(2);
-			return performance.now() - tKey;
-		})(),
-		Bun.sleep(timeoutMs).then(() => null),
-	]);
-	if (latencyMs === null) {
-		throw new SampleFailure("no-input-response", `no repaint within ${timeoutMs}ms of a keystroke`);
+	const paintedAt = await handles.paints.nextFrameAfter(framesBefore, tKey, timeoutMs);
+	if (paintedAt === 0) {
+		throw new SampleFailure("no-paint-response", `no painted frame within ${timeoutMs}ms of a keystroke`);
 	}
-	return { latencyMs };
+	return { latencyMs: paintedAt - tKey };
 }
 
 /**
@@ -390,10 +516,12 @@ async function pressAndAwait(handles: SessionHandles, key: string, timeoutMs: nu
 export async function measureInteractiveFrame(options: RunOptions): Promise<InteractiveFrameSample> {
 	const handles = await startInteractive(options);
 	try {
+		const framesBeforeInput = handles.paints.frames;
 		const { latencyMs } = await pressAndAwait(handles, "x", options.timeoutMs);
 		return {
 			firstInteractiveFrameMs: handles.composerAt - handles.t0,
 			inputRoundTripMs: latencyMs,
+			framesPaintedBeforeInput: framesBeforeInput,
 			composerPainted: handles.composerAt > 0,
 			// Kept as a diagnostic: the gap between "first byte" and "first
 			// interactive frame" is the part of the boot that is not yet usable.
@@ -415,6 +543,7 @@ export async function openInteractiveSession(options: RunOptions): Promise<Inter
 	return {
 		firstInteractiveFrameMs: handles.composerAt - handles.t0,
 		firstTerminalWriteMs: handles.firstWriteAt - handles.t0,
+		framesPainted: () => handles.paints.frames,
 		press: key => pressAndAwait(handles, key, options.timeoutMs),
 		close: () => handles.dispose(),
 	};

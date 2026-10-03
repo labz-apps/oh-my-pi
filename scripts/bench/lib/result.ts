@@ -38,8 +38,15 @@ export const SCHEMA_VERSION = 1;
  * to the percentile estimator, a change to what a sample is). Results with
  * different harness versions are not comparable even when the field names
  * match.
+ *
+ * `2` — an input sample resolved on the *next byte* from the pty, which the
+ * terminal's own line-discipline echo satisfies in microseconds. It therefore
+ * measured echo, not the app: every sample came out at the 2 ms poll interval
+ * with a spread of 0 ms. Input-to-paint now resolves on a completed paint frame
+ * (the DEC 2026 bracket), and the cold-start input gate uses the same
+ * instrument. `2` numbers are not comparable with `1` numbers.
  */
-export const HARNESS_VERSION = "1";
+export const HARNESS_VERSION = "2";
 
 export interface HarnessConfig {
 	runs: number;

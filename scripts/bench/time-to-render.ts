@@ -8,9 +8,15 @@
  * this interval has no launch in it. One session is opened, the first
  * interactive frame is awaited (the same gate cold start uses, so both benchmarks
  * agree on what "interactive" means), and then each sample is one keystroke
- * written into the pty followed by the next terminal write. Waiting on the
- * event rather than sleeping is load-bearing: a fixed delay would either
- * over-report every sample or race the repaint.
+ * written into the pty followed by the **completion of the paint frame that
+ * answers it**. Waiting on the event rather than sleeping is load-bearing: a
+ * fixed delay would either over-report every sample or race the repaint.
+ *
+ * The sample must end on a frame, not on the next byte the pty returns. A pty
+ * echoes the keystroke back in microseconds, so a byte-level resolution reports
+ * the terminal instead of the app — as a flat, zero-spread ~2 ms for every
+ * sample. See the frame-boundary section in `README.md` for the measured
+ * before/after and why `HARNESS_VERSION` is `2`.
  *
  * A keystroke, not a resize or a paste: a resize repaints everything and would
  * measure layout rather than input handling.
@@ -98,6 +104,10 @@ async function measure(
 				discardedSettlingSamples: DISCARD,
 				percentileEstimator: "nearest-rank",
 				terminal: { cols: 120, rows: 30, term: "xterm-256color" },
+				// How a sample ends. Part of the series: an input sample resolved
+				// on a completed paint frame is a different measurement from one
+				// resolved on the next byte the terminal returns.
+				paintBoundary: "dec-2026-synchronized-output-bracket",
 				quick: args.quick,
 			},
 			metrics,
