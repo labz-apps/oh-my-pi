@@ -537,18 +537,31 @@ function blobRefSites(values: readonly unknown[]): BlobRefSite[] {
 	return sites;
 }
 
+function blobSiteKey(site: BlobRefSite): string {
+	return `${site.asDataUrl ? "url" : "base64"}:${site.ref}`;
+}
+
 async function resolveBlobRefs(values: readonly unknown[], blobStore: BlobStore): Promise<void> {
 	const semaphore = new Semaphore(BLOB_READ_CONCURRENCY);
+	const resolved = new Map<string, Promise<string>>();
 	await Promise.all(
 		blobRefSites(values).map(async site => {
-			await semaphore.acquire();
-			try {
-				site.holder[site.key] = await (site.asDataUrl
-					? resolveImageDataUrl(blobStore, site.ref)
-					: resolveImageData(blobStore, site.ref));
-			} finally {
-				semaphore.release();
+			const key = blobSiteKey(site);
+			let data = resolved.get(key);
+			if (!data) {
+				data = (async () => {
+					await semaphore.acquire();
+					try {
+						return await (site.asDataUrl
+							? resolveImageDataUrl(blobStore, site.ref)
+							: resolveImageData(blobStore, site.ref));
+					} finally {
+						semaphore.release();
+					}
+				})();
+				resolved.set(key, data);
 			}
+			site.holder[site.key] = await data;
 		}),
 	);
 }
@@ -567,10 +580,17 @@ export async function resolveBlobRefsInEntries(entries: FileEntry[], blobStore: 
 
 /** Synchronous {@link resolveBlobRefsInEntries}. */
 export function resolveBlobRefsInEntriesSync(entries: FileEntry[], blobStore: BlobStore): void {
+	const resolved = new Map<string, string>();
 	for (const site of blobRefSites(entriesForBlobResolution(entries))) {
-		site.holder[site.key] = site.asDataUrl
-			? resolveImageDataUrlSync(blobStore, site.ref)
-			: resolveImageDataSync(blobStore, site.ref);
+		const key = blobSiteKey(site);
+		let data = resolved.get(key);
+		if (data === undefined) {
+			data = site.asDataUrl
+				? resolveImageDataUrlSync(blobStore, site.ref)
+				: resolveImageDataSync(blobStore, site.ref);
+			resolved.set(key, data);
+		}
+		site.holder[site.key] = data;
 	}
 }
 
