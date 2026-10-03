@@ -58,7 +58,7 @@ describe("text-mode command reports on a real terminal core", () => {
 	});
 
 	async function mountTranscript(rows: number): Promise<string> {
-		await mode.init({ suppressWelcomeIntro: true });
+		await mode.init({});
 		void mode.getUserInput();
 		await term.waitForRender();
 		for (let i = 0; i < rows; i++) mode.chatContainer.addChild(new Text(`TRANSCRIPT ${i}`, 0, 0));
