@@ -153,10 +153,35 @@ it is reported with small variations across boots and a changed id would split
 one series in two.
 
 Build type is pinned per series. The publishable series measures a **source run
-under `bun`** (`buildType: "source-run-bun"` in `harness.config`). The compiled
-`omp` binary is a different program and needs its own series; a compiled-binary
-series cannot carry the module-load profile, because every module is pre-bundled
+under `bun`**, recorded as `harness.build: "source"`. `source`, `bundle`, and
+`binary` are three different programs, so a delta between two of them would be
+measuring the packaging rather than the change; the value is part of the series
+key, not a note. The harness only produces `source`. A compiled-binary series
+also cannot carry the module-load profile, because every module is pre-bundled
 into `bunfs` and `module-timer`'s `onLoad` never fires.
+
+### Provenance the schema cannot infer
+
+Three fields exist because a result file otherwise cannot prove what it claims,
+and the leaderboard refuses a document that leaves them out.
+
+| Field | Why it exists |
+| --- | --- |
+| `harness.build` | `source`, `bundle`, or `binary`. Part of the series key. |
+| `commit.shaAtFinish` | The head seen when the run *finished*. Must equal `commit.sha`. This checkout is shared and a rebase, branch switch, or `git pull` can move the tree mid-run; `sha` alone records only what was true at the start, so the measurement would be one number wearing whichever of two revisions happened to be on disk. |
+| `machine.concurrentRuns` | Same-benchmark runs active on this machine during this run, including this one. `1` means it had the machine to itself. |
+
+`machine.concurrentRuns` is taken from a **lease**, not from load average:
+several agents share one machine, and load cannot tell you whether CPU pressure
+came from another measurement. The lease is a directory keyed by machine id and
+benchmark — `mkdir` is the one atomic primitive available without a daemon — and
+a lease whose process is gone past a TTL is reclaimed, so a killed run cannot
+wedge the machine as permanently contended.
+
+Above `1`, the run is still written. The contract's answer to a noisy run is
+*record it, do not publish it*: it stays in `data/results/` as evidence and is
+excluded from the leaderboard, the charts, the deltas, the changelog, and from
+serving as the next run's baseline.
 
 ### Percentiles
 
@@ -237,3 +262,4 @@ mistake the profile for the whole graph:
 | `lib/provenance.ts` | Machine, versions, commit, run id. |
 | `lib/result.ts` | Result document assembly and pre-import checks. |
 | `lib/cli.ts` | Shared flags and the sample loop. |
+| `lib/lease.ts` | Machine lease: how many runs of this benchmark shared the machine. |
