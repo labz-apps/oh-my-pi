@@ -50,6 +50,13 @@ export interface DiscoverAuthStorageOptions {
 	accountPool?: AuthBrokerAccountPool;
 	accountPolicies?: AuthAccountPolicies;
 	authStorageOptions?: Omit<AuthStorageOptions, "accountPolicies" | "configValueResolver" | "sourceLabel">;
+	/**
+	 * Local credential store the caller has already opened, adopted instead of
+	 * opening a second connection to `agentDir`'s `agent.db`. Ignored when a
+	 * broker is configured, since the broker store wins regardless. The caller
+	 * owns its lifetime: the returned {@link AuthStorage} never closes it.
+	 */
+	credentialStore?: AuthCredentialStore;
 }
 
 /** Path to the local bearer token file. Created by `omp auth-broker token`. */
@@ -472,19 +479,27 @@ export async function discoverAuthStorage(options: DiscoverAuthStorageOptions = 
 		accountPolicies: options.accountPolicies,
 		usageReservePct: options.authStorageOptions?.defaultReservePct,
 	});
-	const { store, sourceLabel } = await openAuthCredentialStore({
-		brokerConfig,
-		agentDir,
-		cachePath: options.cachePath,
-		sourceLabel: options.sourceLabel,
-		accountPool: options.accountPool,
-	});
+	// A caller that already holds the local connection hands it over instead of
+	// paying for a second open of the same file. A broker store still wins: it
+	// is a different source of truth, not a duplicate of this one.
+	const sharedStore = brokerConfig === null ? options.credentialStore : undefined;
+	const { store, sourceLabel } = sharedStore
+		? { store: sharedStore, sourceLabel: options.sourceLabel ?? `local ${getAgentDbPath(agentDir)}` }
+		: await openAuthCredentialStore({
+				brokerConfig,
+				agentDir,
+				cachePath: options.cachePath,
+				sourceLabel: options.sourceLabel,
+				accountPool: options.accountPool,
+			});
 	const storage = new AuthStorage(store, {
 		...options.authStorageOptions,
 		configValueResolver: options.configValueResolver,
 		sourceLabel,
 		accountPolicies,
 		defaultReservePct,
+		// A shared store's connection belongs to whoever opened it.
+		ownsStore: sharedStore === undefined,
 	});
 	await storage.credentials.reload();
 	return storage;

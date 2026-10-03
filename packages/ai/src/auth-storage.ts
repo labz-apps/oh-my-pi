@@ -174,6 +174,7 @@ export class AuthStorage {
 		const pool = new CredentialPool(store, {
 			policies,
 			blockHealth,
+			ownsStore: options.ownsStore,
 			onReset: provider => {
 				selector.resetRoundRobin(provider);
 				affinity.clearProvider(provider);

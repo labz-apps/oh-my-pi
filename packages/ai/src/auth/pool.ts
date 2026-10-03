@@ -84,6 +84,8 @@ export interface CredentialPoolOptions {
 	blockHealth: BlockStoreHealth;
 	/** Called whenever a provider's credential set changed locally. */
 	onReset: (provider: string) => void;
+	/** Close the backing store on {@link CredentialPool.close}. Defaults to `true`. */
+	ownsStore?: boolean;
 }
 
 /** In-memory credential snapshot over an AuthCredentialStore: CRUD, change detection, events. */
@@ -160,6 +162,9 @@ export class CredentialPool implements CredentialsApi {
 	close(): void {
 		if (this.#closed) return;
 		this.#closed = true;
+		// A borrowed store stays open for whoever opened it; its connection and
+		// prepared statements outlive this pool.
+		if (this.#options.ownsStore === false) return;
 		this.#store.close();
 	}
 

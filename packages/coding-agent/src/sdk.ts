@@ -13,6 +13,7 @@ import {
 	type ThinkingLevel,
 } from "@oh-my-pi/pi-agent-core";
 import type {
+	AuthCredentialStore,
 	Context,
 	CredentialDisabledEvent,
 	Effort,
@@ -33,7 +34,7 @@ import { withCredentialRedaction } from "@oh-my-pi/pi-ai/providers/transform-mes
 import { FALLBACK_DIALECT, preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { $env } from "@oh-my-pi/pi-utils/env";
-import { getAgentDir, getModelDbPath, getProjectDir } from "@oh-my-pi/pi-utils/dirs";
+import { getAgentDbPath, getAgentDir, getModelDbPath, getProjectDir } from "@oh-my-pi/pi-utils/dirs";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import * as postmortem from "@oh-my-pi/pi-utils/postmortem";
 import * as prompt from "@oh-my-pi/pi-utils/prompt";
@@ -932,6 +933,12 @@ export {
  * effective settings: `options.settings` when given, else the matching global
  * instance, else a read-only load for `options.cwd`; explicit option values win.
  *
+ * When `options.settings` already holds an {@link AgentStorage} on this very
+ * `agent.db`, its credential store is handed to discovery instead of opening a
+ * second connection to the same file: startup already needs that connection for
+ * settings, and a second one costs a WAL open plus a full schema pass on the
+ * critical path to the first interactive frame.
+ *
  * Delegates to {@link ./session/auth-broker-config} so the TUI and the catalog
  * generator share the same credential-discovery logic.
  */
@@ -942,14 +949,27 @@ export async function discoverAuthStorage(
 ): Promise<AuthStorage> {
 	const { settings, cwd, ...discoveryOptions } = options;
 	const policy = await loadEffectiveAuthAccountPolicyConfig({ settings, cwd, agentDir });
+	const shared = sharedAgentCredentialStore(settings, agentDir);
 	return discoverAuthStorageFromConfig(agentDir, {
 		...discoveryOptions,
+		credentialStore: discoveryOptions.credentialStore ?? shared,
 		accountPolicies: discoveryOptions.accountPolicies ?? policy.accountPolicies,
 		authStorageOptions: {
 			...discoveryOptions.authStorageOptions,
 			defaultReservePct: discoveryOptions.authStorageOptions?.defaultReservePct ?? policy.defaultReservePct,
 		},
 	});
+}
+
+/**
+ * The credential store of `settings`' own `agent.db` connection, when that is the
+ * file discovery is about to open. Read-only settings loads never open storage,
+ * and a storage opened on some other file (tests, embedding) must not be shared.
+ */
+function sharedAgentCredentialStore(settings: Settings | undefined, agentDir: string): AuthCredentialStore | undefined {
+	const storage = settings?.getStorage();
+	if (!storage || storage.dbPath !== getAgentDbPath(agentDir)) return undefined;
+	return storage.authStore;
 }
 
 /**
