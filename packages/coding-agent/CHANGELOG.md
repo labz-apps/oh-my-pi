@@ -95,6 +95,7 @@
 ### Changed
 
 - Reduced memory use and loading time when session history references the same image more than once ([#14102](https://github.com/can1357/oh-my-pi/pull/14102) by [@iliaal](https://github.com/iliaal)).
+- Reduced temporary memory usage and copying when forking a session ([#14105](https://github.com/can1357/oh-my-pi/pull/14105) by [@iliaal](https://github.com/iliaal)).
 
 ## [18.4.10] - 2026-10-02
 

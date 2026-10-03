@@ -410,7 +410,10 @@ export async function loadSessionFile(
 	}
 }
 
-/** Load the valid entries from a session file, skipping malformed records. */
+/**
+ * Load the valid entries from a session file, skipping malformed records.
+ * Each call returns freshly parsed entries owned by the caller.
+ */
 export async function loadEntriesFromFile(
 	filePath: string,
 	storage: SessionStorage = new FileSessionStorage(),
