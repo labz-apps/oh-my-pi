@@ -71,10 +71,14 @@ export function beginStartupComposer(options: PrepaintComposerOptions = {}): voi
 	if (pendingComposer) throw new Error("A prepaint composer is already active");
 	const cwd = options.cwd ?? process.cwd();
 	const cache = options.cache === false ? undefined : sharedComposerCache();
+	coldstartProbe("prepaint-cache-open");
 	const cached = cache ? cache.read(cwd) : { preferences: undefined, theme: undefined, status: undefined };
+	coldstartProbe("prepaint-cache-read");
 	const theme = { ...cached.theme, ...options.theme };
 	initThemeSync(theme.symbolPreset, theme.colorBlindMode, theme.darkTheme, theme.lightTheme);
+	coldstartProbe("prepaint-theme");
 	setMagicKeywords(MAGIC_KEYWORDS);
+	coldstartProbe("prepaint-magic");
 	const preferences = { ...COMPOSER_DEFAULTS, ...cached.preferences, ...options.preferences };
 	const welcome: ComposerWelcomeUpdate = { version: options.version ?? "" };
 	const composer = new Composer({
@@ -85,6 +89,7 @@ export function beginStartupComposer(options: PrepaintComposerOptions = {}): voi
 		welcome,
 		status: cached.status,
 	});
+	coldstartProbe("prepaint-ctor");
 	try {
 		composer.start({ clearScrollback: true, deferInput: true });
 		coldstartProbe("prepaint-frame");

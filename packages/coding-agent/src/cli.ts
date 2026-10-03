@@ -572,6 +572,7 @@ export async function runCli(argv: string[]): Promise<void> {
 		// keeps the TUI graph out of worker, subcommand, help, and version launches.
 		// Loading it statically would erase the measured cold-start improvement.
 		const { beginStartupComposer, stopPendingStartupComposer } = await import("./modes/startup-composer");
+		coldstartProbe("prepaint-graph-loaded");
 		beginStartupComposer({ version: VERSION });
 		stopStartupComposer = stopPendingStartupComposer;
 	}

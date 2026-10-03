@@ -14,11 +14,17 @@
  * only starts once `main.ts` has been imported.
  *
  * Marks, in the order a cold interactive launch reaches them:
- *   cli-entry         first statement of runCli (after exec + runtime init)
- *   prepaint-frame    speculative composer frame committed (input still cooked)
- *   input-enabled     raw mode installed — THE cold-start number
- *   interactive-frame full runtime tree committed (transcript, status line)
- *   interactive-ready submit pipeline live (Enter dispatches)
+ *   cli-entry          first statement of runCli (after exec + runtime init)
+ *   prepaint-graph-loaded  startup-composer module graph evaluated
+ *   prepaint-cache-open     sqlite composer cache opened
+ *   prepaint-cache-read     sqlite composer cache read for cwd
+ *   prepaint-theme          initThemeSync done
+ *   prepaint-magic          setMagicKeywords done
+ *   prepaint-ctor           new Composer done
+ *   prepaint-frame          speculative composer frame committed (input still cooked)
+ *   input-enabled           raw mode installed — THE cold-start number
+ *   interactive-frame       full runtime tree committed (transcript, status line)
+ *   interactive-ready       submit pipeline live (Enter dispatches)
  *
  * Each sample runs under a real PTY (`script -qfec`) because the app takes the
  * speculative-prepaint path only when stdin and stdout are TTYs.
@@ -122,19 +128,20 @@ async function runSample(binary: string, cpus?: string): Promise<Record<string, 
 	return result;
 }
 
-const order = [
+const marks = [
 	"cli-entry",
+	"prepaint-graph-loaded",
+	"prepaint-cache-open",
+	"prepaint-cache-read",
+	"prepaint-theme",
+	"prepaint-magic",
+	"prepaint-ctor",
 	"prepaint-frame",
 	"input-enabled",
 	"interactive-frame",
 	"interactive-ready",
-	"launch-exit",
-	"cli-entry:cpu",
-	"prepaint-frame:cpu",
-	"input-enabled:cpu",
-	"interactive-frame:cpu",
-	"interactive-ready:cpu",
 ];
+const order = [...marks, "launch-exit", ...marks.map(mark => `${mark}:cpu`)];
 const arms = compare.length > 0 ? compare : [singleBinary];
 const cpuList = flag("cpus");
 const rounds: Array<Record<string, Record<string, number>>> = [];
