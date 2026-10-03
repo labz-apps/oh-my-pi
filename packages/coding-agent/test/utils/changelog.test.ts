@@ -368,15 +368,6 @@ describe.skipIf(!hasPtyHarness)("interactive startup changelog PTY smoke", () =>
 					["timeout", "6s", "script", "-q", "-c", `bun ${JSON.stringify(cliEntry)}`, "/dev/null"],
 					{
 						cwd: repoRoot,
-						// Hold stdin open instead of inheriting Bun's default of
-						// "ignore". `script` forwards its own stdin to the pty, so an
-						// already-closed stdin hands the CLI EOF before it finishes
-						// booting. A fast boot then races that EOF and quits on its own,
-						// which makes the exit-code assertion below depend on machine
-						// load instead of on the CLI. With the pipe held open the CLI
-						// blocks for input until `timeout` kills it, so this smoke test
-						// measures a rendered first frame on any runner.
-						stdin: "pipe",
 						stdout: "pipe",
 						stderr: "pipe",
 						env: {
@@ -400,6 +391,23 @@ describe.skipIf(!hasPtyHarness)("interactive startup changelog PTY smoke", () =>
 					proc.exited,
 				]);
 				const output = Buffer.from(stdout).toString("utf8");
+
+				// Bun aborts a test at its first failed assertion, so everything the
+				// checks below would have said is lost when the exit code is wrong -
+				// which is precisely the case worth diagnosing. Report it first.
+				if (exitCode !== 124) {
+					const marker = await readLastChangelogVersion(agentDir);
+					console.error(
+						[
+							`[changelog-pty-smoke] exitCode=${exitCode} signal=${proc.signalCode ?? "-"} killed=${proc.killed}`,
+							`[changelog-pty-smoke] stdoutBytes=${Buffer.byteLength(output)} stderrBytes=${Buffer.byteLength(stderr)}`,
+							`[changelog-pty-smoke] hasChangelogHeading=${output.includes("## [")} hasFullHint=${output.includes(STARTUP_CHANGELOG_FULL_HINT)} stderrHasModuleError=${stderr.includes("Cannot find module")}`,
+							`[changelog-pty-smoke] lastChangelogVersion=${marker ?? "MISSING"} expected=${VERSION}`,
+							`[changelog-pty-smoke] --- stdout tail ---\n${output.slice(-3000)}`,
+							`[changelog-pty-smoke] --- stderr tail ---\n${stderr.slice(-3000)}`,
+						].join("\n"),
+					);
+				}
 
 				expect(exitCode).toBe(124);
 				expect(Buffer.byteLength(output)).toBeLessThan(PTY_STARTUP_OUTPUT_CEILING);
