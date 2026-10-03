@@ -14,7 +14,7 @@
  * says what is missing instead of letting a sample time out.
  */
 
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
 import { isAbsolute, join, relative, sep } from "node:path";
 
 import { REPO_ROOT } from "./provenance";
@@ -32,6 +32,9 @@ const GENERATED_TOOL_VIEWS = join(
 
 /** The entry the interactive path spawns. */
 const CLI_ENTRY = join(REPO_ROOT, "packages", "coding-agent", "src", "cli.ts");
+
+/** Gitignored build output of the Rust addon; must be present to measure anything. */
+const NATIVE_DIR = join(REPO_ROOT, "packages", "natives", "native");
 
 /** Workspace package used to prove `@oh-my-pi/*` resolves to *this* checkout. */
 const RESOLUTION_PROBE = "@oh-my-pi/pi-tui/package.json";
@@ -105,6 +108,15 @@ export function assertPreconditions(): void {
 		});
 	}
 
+	if (!nativesReady()) {
+		problems.push({
+			what:
+				"the Rust native addons are not built, so the app exits 1 during module init " +
+				"(Cannot find module '@oh-my-pi/pi-natives/path') and never paints",
+			fix: "bun --cwd=packages/natives run build",
+		});
+	}
+
 	if (problems.length > 0) {
 		throw new Error(
 			`benchmark harness preconditions not met (${problems.length}):\n` +
@@ -114,18 +126,43 @@ export function assertPreconditions(): void {
 }
 
 /**
+ * True when the Rust native addons are present and loadable in this checkout.
+ *
+ * Not a soft requirement. Without a built `pi_natives.*.node` the subpath export
+ * fails to resolve and the app exits 1 during module init, before any paint:
+ *
+ *   error: Cannot find module '@oh-my-pi/pi-natives/path'
+ *          from 'packages/utils/src/dirs.ts'
+ *
+ * So a checkout without them produces no interactive frame at all, and every
+ * sample would burn its whole timeout and then report `no-paint`, which points at
+ * the TUI instead of at the missing build.
+ */
+function nativesReady(): boolean {
+	if (!existsSync(NATIVE_DIR)) return false;
+	const built = readdirSync(NATIVE_DIR).some(file => file.endsWith(".node"));
+	if (!built) return false;
+	try {
+		// The exact specifier the app itself fails on, so a built-but-unloadable
+		// addon (wrong architecture) is caught here rather than per sample.
+		Bun.resolveSync("@oh-my-pi/pi-natives/path", REPO_ROOT);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+/**
  * Non-fatal advisories, printed once before sampling.
  *
- * The Rust natives are a warning rather than an error because the interactive
- * first-frame path degrades without them; the `PI_TIMING` chain path does not, so
- * a cold-start run reports its own `prePaintChainMs` samples as failures rather
- * than quietly dropping them.
+ * Reserved for conditions that change how a number should be read rather than
+ * whether it can be measured at all.
  */
 export function preflightWarnings(): string[] {
 	const warnings: string[] = [];
-	if (!existsSync(join(REPO_ROOT, "packages", "natives", "native"))) {
+	if (!nativesReady()) {
 		warnings.push(
-			"packages/natives/native is absent; prePaintChainMs samples will fail (build with `bun --cwd=packages/natives run build`)",
+			"packages/natives/native is absent; both series need the Rust addons, so this run will not produce a frame",
 		);
 	}
 	return warnings;

@@ -39,8 +39,14 @@ bringing it up, and each is stated here rather than discovered again.
 | `bun >= 1.4` on `PATH` | `packageManager` is `bun@>=1.4`; every script is `bun ...`. | `bun --version` |
 | `bun install` has run | Workspace links under `node_modules/@oh-my-pi/*` must point at *this* checkout. A `node_modules` symlinked from another worktree resolves `@oh-my-pi` to that other checkout's sources and produces a syntactically valid mixture of two revisions. | `bun run ci:test:smoke` |
 | `prepare` has run | `bun install` generates `packages/coding-agent/src/export/html/tool-views.generated.js` (gitignored). Without it the CLI exits 1 with `Cannot find module './tool-views.generated.js'`. | file exists |
-| Rust natives built | `packages/natives/native/pi_natives.linux-x64-*.node` (gitignored). The `PI_TIMING` chain path hard-fails without them; the interactive first-frame path degrades instead. | `bun --cwd=packages/natives run build` |
+| Rust natives built | `packages/natives/native/pi_natives.linux-x64-*.node` (gitignored). Without them the subpath export fails to resolve and the app exits 1 during module init — `Cannot find module '@oh-my-pi/pi-natives/path'` — so **neither** series can paint a frame. | `bun --cwd=packages/natives run build` |
 | No `hyperfine` needed | Deliberate. See below. | — |
+
+Every row above is **enforced**, not advice: `assertPreconditions()` runs before
+the machine lease and before the first sample, and throws with the fix for each
+unmet condition. An earlier version documented these and checked none of them, so
+a fresh clone burned its whole 120 s per-sample budget and then reported
+`no-paint` — which points at the TUI rather than at the missing build.
 
 ### No hyperfine
 
@@ -306,9 +312,10 @@ mistake the profile for the whole graph:
 | `cold-start.ts` | The publishable cold-start entry point. |
 | `time-to-render.ts` | Input-to-paint entry point. |
 | `run-all.ts` | The suite entry point. |
-| `lib/pty.ts` | Real-pty sample runner; timing-tree parser. |
+| `lib/pty.ts` | Real-pty sample runner; paint-frame tracker; timing-tree parser. |
 | `lib/stats.ts` | Percentiles and the estimator's rationale. |
 | `lib/provenance.ts` | Machine, versions, commit, run id. |
 | `lib/result.ts` | Result document assembly and pre-import checks. |
+| `lib/preflight.ts` | Enforces the preconditions above before any sample is taken. |
 | `lib/cli.ts` | Shared flags and the sample loop. |
 | `lib/lease.ts` | Machine lease: how many runs of this benchmark shared the machine. |
