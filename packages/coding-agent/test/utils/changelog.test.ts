@@ -368,6 +368,15 @@ describe.skipIf(!hasPtyHarness)("interactive startup changelog PTY smoke", () =>
 					["timeout", "6s", "script", "-q", "-c", `bun ${JSON.stringify(cliEntry)}`, "/dev/null"],
 					{
 						cwd: repoRoot,
+						// Hold stdin open instead of inheriting Bun's default of
+						// "ignore". `script` forwards its own stdin to the pty, so an
+						// already-closed stdin hands the CLI EOF before it finishes
+						// booting. A fast boot then races that EOF and quits on its own,
+						// which makes the exit-code assertion below depend on machine
+						// load instead of on the CLI. With the pipe held open the CLI
+						// blocks for input until `timeout` kills it, so this smoke test
+						// measures a rendered first frame on any runner.
+						stdin: "pipe",
 						stdout: "pipe",
 						stderr: "pipe",
 						env: {
