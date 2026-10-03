@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `keepEventLoopAlive()`, a held handle that keeps the process alive across a window whose only pending work is an unresolved promise
+
+### Fixed
+
+- Fixed the "ended before completing" diagnostic landing in the log file instead of the terminal when the stderr guard was active
+
 ## [18.5.0] - 2026-10-03
 
 ### Added
