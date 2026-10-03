@@ -1,3 +1,4 @@
+import { coldstartProbe } from "@oh-my-pi/pi-utils/coldstart-probe";
 import type { Terminal } from "@oh-my-pi/pi-tui";
 import {
 	COMPOSER_DEFAULTS,
@@ -86,6 +87,7 @@ export function beginStartupComposer(options: PrepaintComposerOptions = {}): voi
 	});
 	try {
 		composer.start({ clearScrollback: true, deferInput: true });
+		coldstartProbe("prepaint-frame");
 	} catch (error) {
 		try {
 			composer.stop();
@@ -129,5 +131,6 @@ export function applyStartupComposerPreferences(update: PrepaintComposerPreferen
 	// responsive again: take raw-input ownership now. The kernel echoed (and
 	// buffered) everything typed during the load; the editor replays it here.
 	pending.composer.enableInput();
+	coldstartProbe("input-enabled");
 	pending.cache?.writeUi(pending.cwd, preferences, update.theme);
 }
