@@ -27,6 +27,7 @@
  */
 
 import { collectSamples, commandLine, parseArgs, reportSpread } from "./lib/cli";
+import { acquireMachineLease } from "./lib/lease";
 import {
 	measureInteractiveFrame,
 	measurePrePaintChain,
@@ -34,7 +35,7 @@ import {
 	type PrePaintChainSample,
 	type RunOptions,
 } from "./lib/pty";
-import { REPO_ROOT, detectCommit, detectMachine, detectVersions, newRunId } from "./lib/provenance";
+import { REPO_ROOT, detectCommit, detectMachine, detectShaAtFinish, detectVersions, newRunId } from "./lib/provenance";
 import { buildResultDoc, writeResultDoc, type ResultDoc } from "./lib/result";
 import { summarize } from "./lib/stats";
 
@@ -43,12 +44,30 @@ const SCRIPT = "cold-start.ts";
 async function main(): Promise<void> {
 	const argv = process.argv.slice(2);
 	const args = parseArgs(argv);
+	// The machine lease is taken before the first sample and released in
+	// `finally`, so `concurrentRuns` describes the whole measurement window rather
+	// than an instant. The lease is keyed by the machine id, which is derived from
+	// hardware first, so contention is a property of the machine and not of the
+	// revision being measured.
+	const lease = acquireMachineLease(detectMachine().id, "cold-start");
+	try {
+		await measure(args, commandLine(SCRIPT, argv), lease);
+	} finally {
+		lease.release();
+	}
+}
+
+/** Take the samples and write the document. The caller releases the lease. */
+async function measure(
+	args: ReturnType<typeof parseArgs>,
+	command: string,
+	lease: ReturnType<typeof acquireMachineLease>,
+): Promise<void> {
 	const startedAt = new Date();
 	const runId = newRunId("cold-start", startedAt);
-	const command = commandLine(SCRIPT, argv);
 	// Probed once: the machine block is the series key, and it must be the same
-	// object in the log, the config, and the result file.
-	const machine = detectMachine();
+	// value in the log, the lease key, and the result file.
+	const machine = detectMachine(lease.concurrentRuns);
 
 	const options: RunOptions = {
 		repoRoot: REPO_ROOT,
@@ -63,6 +82,13 @@ async function main(): Promise<void> {
 
 	process.stderr.write(`cold start on ${machine.id}\n`);
 	process.stderr.write(`run ${runId}\n`);
+	process.stderr.write(
+		lease.concurrentRuns > 1
+			? `WARNING: ${lease.concurrentRuns} cold-start runs are sharing this machine. ` +
+					`This run is recorded as evidence and will not be a leaderboard row, a chart point, ` +
+					`or the baseline for a later run.\n`
+			: `machine held exclusively (concurrentRuns 1)\n`,
+	);
 
 	const frames = await collectSamples("first-frame", args.runs, args.warmupRuns, args.maxFailures, index =>
 		measureInteractiveFrame(options).then(sample => {
@@ -113,7 +139,7 @@ async function main(): Promise<void> {
 		runId,
 		startedAt,
 		finishedAt: new Date(),
-		commit: detectCommit(),
+		commit: { ...detectCommit(), shaAtFinish: detectShaAtFinish() },
 		machine,
 		versions: detectVersions(),
 		command,
@@ -123,8 +149,6 @@ async function main(): Promise<void> {
 			coldCache: !args.noColdCache,
 			timeoutMs: args.timeoutMs,
 			quick: args.quick,
-			buildType: "source-run-bun",
-			moduleProfile: args.profile,
 			percentileEstimator: "nearest-rank",
 			terminal: { cols: 120, rows: 30, term: "xterm-256color" },
 		},

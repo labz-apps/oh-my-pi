@@ -17,8 +17,9 @@
  */
 
 import { collectSamples, commandLine, parseArgs, reportSpread } from "./lib/cli";
+import { acquireMachineLease } from "./lib/lease";
 import { openInteractiveSession, type InputSample, type RunOptions } from "./lib/pty";
-import { REPO_ROOT, detectCommit, detectMachine, detectVersions, newRunId } from "./lib/provenance";
+import { REPO_ROOT, detectCommit, detectMachine, detectShaAtFinish, detectVersions, newRunId } from "./lib/provenance";
 import { buildResultDoc, writeResultDoc, type ResultDoc } from "./lib/result";
 import { summarize } from "./lib/stats";
 
@@ -31,10 +32,23 @@ const DISCARD = 5;
 async function main(): Promise<void> {
 	const argv = process.argv.slice(2);
 	const args = parseArgs(argv);
+	const lease = acquireMachineLease(detectMachine().id, "time-to-render");
+	try {
+		await measure(args, commandLine(SCRIPT, argv), lease);
+	} finally {
+		lease.release();
+	}
+}
+
+/** Take the samples and write the document. The caller releases the lease. */
+async function measure(
+	args: ReturnType<typeof parseArgs>,
+	command: string,
+	lease: ReturnType<typeof acquireMachineLease>,
+): Promise<void> {
 	const startedAt = new Date();
 	const runId = newRunId("time-to-render", startedAt);
-	const command = commandLine(SCRIPT, argv);
-	const machine = detectMachine();
+	const machine = detectMachine(lease.concurrentRuns);
 
 	const options: RunOptions = {
 		repoRoot: REPO_ROOT,
@@ -46,6 +60,12 @@ async function main(): Promise<void> {
 
 	process.stderr.write(`time to render on ${machine.id}\n`);
 	process.stderr.write(`run ${runId}\n`);
+	process.stderr.write(
+		lease.concurrentRuns > 1
+			? `WARNING: ${lease.concurrentRuns} time-to-render runs are sharing this machine. ` +
+					`This run is recorded as evidence and will not be a leaderboard row.\n`
+			: `machine held exclusively (concurrentRuns 1)\n`,
+	);
 
 	const session = await openInteractiveSession(options);
 	try {
@@ -66,7 +86,7 @@ async function main(): Promise<void> {
 			runId,
 			startedAt,
 			finishedAt: new Date(),
-			commit: detectCommit(),
+			commit: { ...detectCommit(), shaAtFinish: detectShaAtFinish() },
 			machine,
 			versions: detectVersions(),
 			command,
@@ -76,7 +96,6 @@ async function main(): Promise<void> {
 				coldCache: !args.noColdCache,
 				timeoutMs: args.timeoutMs,
 				discardedSettlingSamples: DISCARD,
-				buildType: "source-run-bun",
 				percentileEstimator: "nearest-rank",
 				terminal: { cols: 120, rows: 30, term: "xterm-256color" },
 				quick: args.quick,

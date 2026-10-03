@@ -20,6 +20,16 @@ import { dirname } from "node:path";
 import type { MetricSummary } from "./stats";
 import type { CommitInfo, MachineInfo, Versions } from "./provenance";
 
+/**
+ * Which program was launched. Must match `BUILD_TYPES` in omp-leaderboard.
+ *
+ * This is a series key, not a note: a source run, the npm bundle, and a
+ * compiled binary are three different programs, so a delta between two of them
+ * would be measuring the packaging instead of the change. The harness only ever
+ * produces a source run; the other two need their own entry points.
+ */
+export const BUILD_TYPE = "source" as const;
+
 /** Must match `SCHEMA_VERSION` in omp-leaderboard. */
 export const SCHEMA_VERSION = 1;
 
@@ -49,7 +59,7 @@ export interface ResultDoc {
 	pr: null;
 	machine: MachineInfo;
 	versions: Versions;
-	harness: { version: string; command: string; config: HarnessConfig };
+	harness: { version: string; command: string; build: string; config: HarnessConfig };
 	metrics: Record<string, MetricSummary>;
 	/** Free-form, schema-permitted extras kept out of `metrics`. */
 	diagnostics?: Record<string, unknown>;
@@ -80,7 +90,7 @@ export function buildResultDoc(input: BuildDocInput): ResultDoc {
 		pr: null,
 		machine: input.machine,
 		versions: input.versions,
-		harness: { version: HARNESS_VERSION, command: input.command, config: input.config },
+		harness: { version: HARNESS_VERSION, command: input.command, build: BUILD_TYPE, config: input.config },
 		metrics: input.metrics,
 		...(input.diagnostics ? { diagnostics: input.diagnostics } : {}),
 	};
@@ -102,6 +112,17 @@ export function assertPublishable(doc: ResultDoc): void {
 	if (doc.machine.memoryGb <= 0) problems.push("machine.memoryGb must be positive");
 	if (!doc.harness.command.trim()) problems.push("harness.command must not be empty");
 	if (!doc.harness.version.trim()) problems.push("harness.version must not be empty");
+	if (!["source", "bundle", "binary"].includes(doc.harness.build)) {
+		problems.push(`harness.build must be one of source, bundle, binary (got ${doc.harness.build})`);
+	}
+	if (!/^[0-9a-f]{7,40}$/.test(doc.commit.shaAtFinish)) {
+		problems.push("commit.shaAtFinish must be a lowercase hex sha");
+	} else if (doc.commit.shaAtFinish !== doc.commit.sha) {
+		problems.push("commit.shaAtFinish differs from commit.sha: the tree moved during the run");
+	}
+	if (!Number.isInteger(doc.machine.concurrentRuns) || doc.machine.concurrentRuns < 1) {
+		problems.push("machine.concurrentRuns must be an integer >= 1");
+	}
 	if (Object.keys(doc.metrics).length === 0) problems.push("metrics must not be empty");
 
 	for (const [name, metric] of Object.entries(doc.metrics)) {

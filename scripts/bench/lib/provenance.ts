@@ -38,12 +38,26 @@ export interface MachineInfo {
 	memoryGb: number;
 	os: string;
 	arch: string;
+	/**
+	 * Same-benchmark runs active on this machine during this run, including this
+	 * one. `1` means the run had the machine to itself. Set by the machine lease
+	 * in `lib/lease.ts`, not detected from load average: load cannot tell you
+	 * whether the CPU pressure came from another measurement.
+	 */
+	concurrentRuns: number;
 }
 
 export interface CommitInfo {
 	sha: string;
 	repo: string;
 	message?: string;
+	/**
+	 * The head observed when the run *finished*. The leaderboard refuses a file
+	 * whose `shaAtFinish` differs from `sha`: a rebase, a branch switch or a
+	 * `git pull` landing in the shared checkout mid-run would otherwise produce
+	 * one number wearing whichever of the two revisions happened to be on disk.
+	 */
+	shaAtFinish: string;
 }
 
 export interface Versions {
@@ -149,7 +163,7 @@ export function slug(text: string): string {
  * facts, never from a hostname or a boot id, so a series survives a reboot and
  * a rename.
  */
-export function detectMachine(): MachineInfo {
+export function detectMachine(concurrentRuns = 1): MachineInfo {
 	const cpuModel = detectCpuModel();
 	const physicalCores = detectPhysicalCores();
 	const memoryGb = detectMemoryGb();
@@ -159,7 +173,7 @@ export function detectMachine(): MachineInfo {
 	// small differences across boots (hotplug, cgroup rounding) and a changed
 	// id would silently split one series in two.
 	const id = `${slug(`${platform()}-${archName}-${cpuModel}`)}-${physicalCores}`;
-	return { id, cpuModel, physicalCores, memoryGb, os: osName, arch: archName };
+	return { id, cpuModel, physicalCores, memoryGb, os: osName, arch: archName, concurrentRuns };
 }
 
 function git(args: string[], cwd = REPO_ROOT): string {
@@ -181,7 +195,20 @@ export function detectCommit(): CommitInfo {
 		throw new Error(`could not read a commit sha from git (got ${JSON.stringify(sha)})`);
 	}
 	const message = git(["log", "-1", "--format=%s"]);
-	return { sha, repo: detectRepo(), ...(message ? { message } : {}) };
+	return { sha, shaAtFinish: sha, repo: detectRepo(), ...(message ? { message } : {}) };
+}
+
+/**
+ * Re-read HEAD after the samples are done.
+ *
+ * Compared against the sha the run started on, this is what proves the
+ * measurement belongs to one commit. A mismatch is reported rather than fixed:
+ * the run still produces a document, and the importer refuses it, which is the
+ * correct outcome for a measurement of a tree that moved underneath it.
+ */
+export function detectShaAtFinish(): string {
+	const sha = git(["rev-parse", "HEAD"]);
+	return /^[0-9a-f]{7,40}$/.test(sha) ? sha : "";
 }
 
 /** oh-my-pi's own version, from the package that ships the CLI. */
