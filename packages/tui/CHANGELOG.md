@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the first frame of an interactive launch taking tens of milliseconds longer than it needs to: the status line discovered the same git repository four times while painting it.
+
 ## [18.5.0] - 2026-10-03
 
 ### Breaking Changes
