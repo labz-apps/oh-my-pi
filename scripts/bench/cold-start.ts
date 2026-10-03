@@ -28,6 +28,7 @@
 
 import { collectSamples, commandLine, parseArgs, reportSpread } from "./lib/cli";
 import { acquireMachineLease } from "./lib/lease";
+import { assertPreconditions, preflightWarnings } from "./lib/preflight";
 import {
 	measureInteractiveFrame,
 	measurePrePaintChain,
@@ -44,6 +45,11 @@ const SCRIPT = "cold-start.ts";
 async function main(): Promise<void> {
 	const argv = process.argv.slice(2);
 	const args = parseArgs(argv);
+	// Before the lease and before any sample: a tree that cannot produce a valid
+	// measurement must not hold the machine or produce a number that looks
+	// publishable.
+	assertPreconditions();
+	for (const warning of preflightWarnings()) process.stderr.write(`warning: ${warning}\n`);
 	// The machine lease is taken before the first sample and released in
 	// `finally`, so `concurrentRuns` describes the whole measurement window rather
 	// than an instant. The lease is keyed by the machine id, which is derived from

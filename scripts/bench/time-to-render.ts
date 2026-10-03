@@ -25,6 +25,7 @@
 import { collectSamples, commandLine, parseArgs, reportSpread } from "./lib/cli";
 import { acquireMachineLease } from "./lib/lease";
 import { openInteractiveSession, type InputSample, type RunOptions } from "./lib/pty";
+import { assertPreconditions, preflightWarnings } from "./lib/preflight";
 import { REPO_ROOT, detectCommit, detectMachine, detectShaAtFinish, detectVersions, newRunId } from "./lib/provenance";
 import { buildResultDoc, writeResultDoc, type ResultDoc } from "./lib/result";
 import { summarize } from "./lib/stats";
@@ -38,6 +39,11 @@ const DISCARD = 5;
 async function main(): Promise<void> {
 	const argv = process.argv.slice(2);
 	const args = parseArgs(argv);
+	// Before the lease and before any sample: a tree that cannot produce a valid
+	// measurement must not hold the machine or produce a number that looks
+	// publishable.
+	assertPreconditions();
+	for (const warning of preflightWarnings()) process.stderr.write(`warning: ${warning}\n`);
 	const lease = acquireMachineLease(detectMachine().id, "time-to-render");
 	try {
 		await measure(args, commandLine(SCRIPT, argv), lease);

@@ -28,9 +28,6 @@ const here = dirname(fileURLToPath(import.meta.url));
 /** Repo root: scripts/bench/lib -> scripts/bench -> scripts -> repo root. */
 export const REPO_ROOT = resolve(here, "..", "..", "..");
 
-/** Which build of the product is being measured. See the README's series rules. */
-export const BUILD_TYPE = "source-run-bun" as const;
-
 export interface MachineInfo {
 	id: string;
 	cpuModel: string;
