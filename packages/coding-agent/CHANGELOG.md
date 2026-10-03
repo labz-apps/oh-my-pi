@@ -91,6 +91,10 @@
 - Fixed project configuration from `~/.omp` being incorrectly applied to unrelated working directories under the user's home directory.
 - Fixed `omp update` failing on standalone-binary installs when npm advertised a version whose GitHub release was never published; the updater now installs the newest published release instead ([#12913](https://github.com/can1357/oh-my-pi/issues/12913)).
 
+### Changed
+
+- Reduced memory use and loading time when session history references the same image more than once ([#14102](https://github.com/can1357/oh-my-pi/pull/14102) by [@iliaal](https://github.com/iliaal)).
+
 ## [18.4.10] - 2026-10-02
 
 ### Added
