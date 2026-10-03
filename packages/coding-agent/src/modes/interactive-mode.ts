@@ -66,6 +66,7 @@ import {
 	sanitizeText,
 	setProjectDir,
 } from "@oh-my-pi/pi-utils";
+import { coldstartProbe } from "@oh-my-pi/pi-utils/coldstart-probe";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { keepEventLoopAlive } from "@oh-my-pi/pi-utils/event-loop-keepalive";
 import { restartArgv } from "../cli/flag-tables";
@@ -2272,6 +2273,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// tree before session_start hooks/reconciliation continue; renderNow keeps
 		// TUI's multiplexer, output-backlog, and image safety gates.
 		this.ui.renderNow();
+		coldstartProbe("interactive-frame");
 
 		const streamCwd = this.sessionManager.getCwd();
 		this.#streamPublisher =
@@ -2495,6 +2497,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// `streamingBehavior: "steer"`, so whichever lands second queues into the
 		// other's turn instead of dying.
 		this.editor.disableSubmit = false;
+		coldstartProbe("interactive-ready");
 	}
 
 	/** Reload the title-generation system prompt override for the provided working
