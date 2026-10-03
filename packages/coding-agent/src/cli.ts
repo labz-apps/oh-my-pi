@@ -501,6 +501,7 @@ export async function runCli(argv: string[]): Promise<void> {
 			// profile instead of the default agent directory.
 			setProfile(resolveProfileEnv(process.env.OMP_PROFILE, process.env.PI_PROFILE));
 		}
+		coldstartProbe("omp19:profile-done");
 		if (extracted.aliasName !== undefined) {
 			// Command boundary: shell/path setup is used only by --alias.
 			const { installProfileAlias, resolveProfileAliasCommandFromProcess } = await import("./cli/profile-alias");
@@ -538,6 +539,7 @@ export async function runCli(argv: string[]): Promise<void> {
 	// This must run before worker selector dispatch so that worker subprocesses
 	// (e.g. stats activity) are registered as hosts and can themselves spawn worker threads.
 	if (isProcessEntry) declareWorkerHostEntry();
+	coldstartProbe("omp19:workerhost-done");
 
 	// Worker-thread entry dispatch must run before the first `await`: the
 	// stats sync worker's buffering onmessage handler is installed in the
@@ -571,8 +573,11 @@ export async function runCli(argv: string[]): Promise<void> {
 		// Intentional exception to the static-import convention: this latency boundary
 		// keeps the TUI graph out of worker, subcommand, help, and version launches.
 		// Loading it statically would erase the measured cold-start improvement.
+		coldstartProbe("omp19:composer-import:start");
 		const { beginStartupComposer, stopPendingStartupComposer } = await import("./modes/startup-composer");
+		coldstartProbe("omp19:composer-import:done");
 		beginStartupComposer({ version: VERSION });
+		coldstartProbe("omp19:begin-composer-done");
 		stopStartupComposer = stopPendingStartupComposer;
 	}
 

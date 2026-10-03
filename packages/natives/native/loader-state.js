@@ -42,8 +42,8 @@ const SUPPORTED_PLATFORMS = [
 ];
 
 /**
- * Streaming startup marker, enabled by `PI_DEBUG_STARTUP`. Local copy of the
- * pi-utils helper (this loader cannot depend on pi-utils). Synchronous on
+ * Streaming startup marker, enabled by `PI_DEBUG_STARTUP`. Local copy of
+ * the pi-utils helper (this loader cannot depend on pi-utils). Synchronous on
  * purpose: extraction/dlopen hangs must still leave the `:start` marker.
  * @param {string} text
  */
@@ -53,6 +53,37 @@ function startupMarker(text) {
 		fs.writeSync(2, `[startup] ${text}\n`);
 	} catch {
 		// stderr unavailable; markers are best-effort
+	}
+}
+
+/**
+ * Cold-start probe, enabled by `OMP_COLDSTART_PROBE=<path>`. Local copy of
+ * `@oh-my-pi/pi-utils/coldstart-probe` (same reason as `startupMarker`): it
+ * attributes the `bun:ffi`/`require` dlopen of the 190 MB addon against the
+ * module-evaluation window that reaches it. Same JSONL shape, same
+ * truncate-once-then-append rule, same "env read once at load" cost model.
+ * @param {string} mark
+ */
+let omp19ProbePath = process.env.OMP_COLDSTART_PROBE;
+const omp19ProbeAppend = process.env.OMP_COLDSTART_PROBE_APPEND === "1";
+let omp19ProbeTruncated = false;
+/** @param {string} mark */
+function coldstartProbe(mark) {
+	if (omp19ProbePath === undefined || omp19ProbePath === "") return;
+	const usage = process.cpuUsage();
+	const line = JSON.stringify({
+		mark,
+		t: performance.timeOrigin + performance.now(),
+		cpu: (usage.user + usage.system) / 1000,
+	});
+	try {
+		if (!omp19ProbeTruncated) {
+			omp19ProbeTruncated = true;
+			if (!omp19ProbeAppend) fs.writeFileSync(omp19ProbePath, "");
+		}
+		fs.appendFileSync(omp19ProbePath, `${line}\n`);
+	} catch {
+		omp19ProbePath = undefined;
 	}
 }
 
@@ -934,11 +965,13 @@ export function initLoaderContext(overrides = {}) {
 
 export function loadNative() {
 	startupMarker("native:loadNative:start");
+	coldstartProbe("omp19:dlopen:start");
 	const ctx = initLoaderContext();
 	const require_ = createRequire(import.meta.url);
 
 	const errors = [];
 	const embeddedCandidate = maybeExtractEmbeddedAddon(ctx, errors);
+	coldstartProbe("omp19:dlopen:ctx+extract");
 	const stagedCandidate = embeddedCandidate ? null : maybeStageNodeModulesAddon(ctx, errors);
 	const prepended = [embeddedCandidate, stagedCandidate].filter(c => typeof c === "string");
 	const runtimeCandidates = prepended.length > 0 ? [...prepended, ...ctx.candidates] : ctx.candidates;
@@ -946,12 +979,15 @@ export function loadNative() {
 	for (const candidate of runtimeCandidates) {
 		try {
 			startupMarker(`native:require:${path.basename(candidate)}`);
+			coldstartProbe(`omp19:dlopen:require:${path.basename(candidate)}`);
 			const bindings = require_(candidate);
+			coldstartProbe("omp19:dlopen:required");
 			validateLoadedBindings(ctx, bindings, candidate);
 			installNativeTokioRuntime(bindings);
 			loadedAddon = describeLoadedAddon(bindings, candidate, ctx);
 	        cleanupStaleNativeVersions({ nativesDir: ctx.nativesDir, currentVersion: ctx.packageVersion });
 			startupMarker("native:loadNative:done");
+			coldstartProbe("omp19:dlopen:done");
 			return bindings;
 		} catch (err) {
 			const message = err instanceof Error ? err.message : String(err);

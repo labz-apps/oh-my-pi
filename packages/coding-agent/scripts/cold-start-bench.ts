@@ -114,15 +114,27 @@ async function runSample(binary: string, cpus?: string): Promise<Record<string, 
 	proc.kill("SIGKILL");
 	await proc.exited;
 	const result: Record<string, number> = {};
-	for (const { mark, t } of marks) result[mark] = round(t - started);
+	// A mark name can legitimately fire more than once in a process (the native
+	// addon is loaded once per realm, and a worker realm has its own registry).
+	// Collapsing repeats into one key silently reorders the timeline — the last
+	// value wins but keeps the first occurrence's position — which turns a real
+	// window into a negative delta. Disambiguate by occurrence so every mark is
+	// its own column and the column order stays the true execution order.
+	const seen = new Map<string, number>();
+	for (const { mark, t, cpu } of marks) {
+		const n = (seen.get(mark) ?? 0) + 1;
+		seen.set(mark, n);
+		const key = n === 1 ? mark : `${mark}#${n}`;
+		result[key] = round(t - started);
+		result[`${key}:cpu`] = round(cpu);
+	}
 	result["launch-exit"] = round(performance.timeOrigin + performance.now() - started);
 	const last = marks[marks.length - 1];
 	result["launch-cpu"] = round(last?.cpu ?? 0);
-	for (const mark of marks) result[`${mark.mark}:cpu`] = round(mark.cpu);
 	return result;
 }
 
-const order = [
+const CANONICAL_ORDER = [
 	"cli-entry",
 	"prepaint-frame",
 	"input-enabled",
@@ -135,6 +147,37 @@ const order = [
 	"interactive-frame:cpu",
 	"interactive-ready:cpu",
 ];
+
+/**
+ * Marks are reported in the order the app actually reached them, so an
+ * attribution probe can add marks without editing this file. The canonical
+ * readiness marks keep their documented order at the top; anything else
+ * (attribution probes) follows in first-seen sequence order.
+ */
+function resolveOrder(rounds: Array<Record<string, Record<string, number>>>): string[] {
+	const seen = new Set<string>();
+	for (const round of rounds) for (const arm of Object.keys(round)) for (const key of Object.keys(round[arm] ?? {})) seen.add(key);
+	const canonical = CANONICAL_ORDER.filter(key => seen.has(key));
+	const extra = new Set<string>();
+	for (const round of rounds) {
+		// Walk the arm whose key list is longest: the most complete sample.
+		for (const arm of Object.keys(round)) {
+			for (const key of Object.keys(round[arm] ?? {})) if (!CANONICAL_ORDER.includes(key)) extra.add(key);
+		}
+	}
+	// Preserve execution order for probe marks by using the first sample that
+	// reached all of them, falling back to sorted order when arms disagree.
+	const seq: string[] = [];
+	for (const round of rounds) {
+		for (const arm of Object.keys(round)) {
+			const keys = Object.keys(round[arm] ?? {}).filter(key => extra.has(key) && !seq.includes(key));
+			for (const key of keys) seq.push(key);
+		}
+		if (seq.length === extra.size) break;
+	}
+	const missing = [...extra].filter(key => !seq.includes(key)).sort();
+	return [...canonical, ...seq, ...missing];
+}
 const arms = compare.length > 0 ? compare : [singleBinary];
 const cpuList = flag("cpus");
 const rounds: Array<Record<string, Record<string, number>>> = [];
@@ -147,6 +190,7 @@ for (let index = 0; index < samples; index++) {
 	}
 	rounds.push(round);
 }
+const order = resolveOrder(rounds);
 const collected = new Map<string, Map<string, number[]>>(
 	arms.map(arm => [arm, new Map(order.map(key => [key, [] as number[]]))]),
 );
